@@ -1,6 +1,7 @@
 package authmatrix.ui;
 
 import authmatrix.model.*;
+import authmatrix.RunEngine;
 import javax.swing.table.AbstractTableModel;
 import java.util.List;
 
@@ -61,7 +62,10 @@ public class MessageTableModel extends AbstractTableModel {
             RoleEntry role = getRoleForColumn(col);
             if (role != null) {
                 msg.setRoleAuthorized(role, (Boolean) val);
-                msg.clearResults();
+                // Re-evaluate colors if we have run results, rather than clearing them
+                if (!msg.getUserRuns().isEmpty()) {
+                    reEvaluateRoleResults(msg);
+                }
                 fireRoleColumnsUpdated(row);
             }
         }
@@ -87,6 +91,10 @@ public class MessageTableModel extends AbstractTableModel {
 
     public boolean isRoleColumn(int col) {
         return col >= STATIC_COLS;
+    }
+
+    private void reEvaluateRoleResults(MessageEntry msg) {
+        RunEngine.evaluateRoleResults(db, msg);
     }
 
     private void fireRoleColumnsUpdated(int row) {

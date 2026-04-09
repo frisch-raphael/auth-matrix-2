@@ -69,6 +69,46 @@ public class RunEngine {
         }
     }
 
+    /**
+     * Run a single message for users belonging to a specific role only.
+     */
+    public void runForRole(MessageEntry message, RoleEntry role, Consumer<Boolean> onRunningChanged,
+                           Consumer<String> onProgress, Runnable onComplete) {
+        db.getLock().lock();
+        try {
+            onRunningChanged.accept(true);
+            cancelled = false;
+
+            // Only run for users in this role — don't clear other results
+            List<UserEntry> usersInRole = db.getUsers().stream()
+                    .filter(u -> u.isEnabled() && u.hasRole(role)).toList();
+            int userNum = 0;
+            int totalUsers = usersInRole.size();
+
+            for (UserEntry user : usersInRole) {
+                if (cancelled) break;
+                userNum++;
+                onProgress.accept(String.format("Request #%d — User %d/%d (%s) [%s]",
+                        message.getId(), userNum, totalUsers, user.getName(), role.getName()));
+                runSingleUserForMessage(message, user);
+            }
+
+            // Only re-evaluate this single role's result
+            List<RoleEntry> authorizedRoles = new ArrayList<>();
+            for (RoleEntry r : db.getAllRoles()) {
+                if (message.isRoleAuthorized(r)) authorizedRoles.add(r);
+            }
+            message.setRoleResult(role, checkResult(db, message, role, authorizedRoles));
+        } catch (Exception e) {
+            api.logging().logToError("Run error: " + e.getMessage());
+        } finally {
+            onRunningChanged.accept(false);
+            onProgress.accept("");
+            db.getLock().unlock();
+            onComplete.run();
+        }
+    }
+
     private void runMessage(MessageEntry msg, int msgNum, int totalMessages, Consumer<String> onProgress) {
         msg.clearResults();
 
@@ -76,51 +116,56 @@ public class RunEngine {
         int userNum = 0;
         int totalUsers = enabledUsers.size();
 
-        for (UserEntry user : db.getUsers()) {
+        for (UserEntry user : enabledUsers) {
             if (cancelled) return;
-            if (!user.isEnabled()) continue;
             userNum++;
             onProgress.accept(String.format("Request %d/%d — User %d/%d (%s)",
                     msgNum, totalMessages, userNum, totalUsers, user.getName()));
-
-            HttpRequest request = buildModifiedRequest(msg, user);
-            byte[] sentRequest = request.toByteArray().getBytes();
-            byte[] responseBytes = null;
-
-            try {
-                // Send with timeout
-                HttpRequestResponse[] result = { null };
-                Thread sender = new Thread(() -> {
-                    try {
-                        result[0] = api.http().sendRequest(request);
-                    } catch (RuntimeException ex) {
-                        api.logging().logToError("Request error for #" + msg.getId() + ": " + ex.getMessage());
-                    }
-                });
-                sender.start();
-                sender.join(REQUEST_TIMEOUT_MS);
-
-                if (sender.isAlive()) {
-                    api.logging().logToOutput("Timeout for Request #" + msg.getId() + " / User " + user.getName());
-                } else if (result[0] != null && result[0].response() != null) {
-                    responseBytes = result[0].response().toByteArray().getBytes();
-                    sentRequest = result[0].request().toByteArray().getBytes();
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-
-            msg.addRunResult(user, sentRequest, responseBytes);
+            runSingleUserForMessage(msg, user);
         }
 
-        // Evaluate role results
+        evaluateRoleResults(db, msg);
+    }
+
+    private void runSingleUserForMessage(MessageEntry msg, UserEntry user) {
+        HttpRequest request = buildModifiedRequest(msg, user);
+        byte[] sentRequest = request.toByteArray().getBytes();
+        byte[] responseBytes = null;
+
+        try {
+            HttpRequestResponse[] result = { null };
+            Thread sender = new Thread(() -> {
+                try {
+                    result[0] = api.http().sendRequest(request);
+                } catch (RuntimeException ex) {
+                    api.logging().logToError("Request error for #" + msg.getId() + ": " + ex.getMessage());
+                }
+            });
+            sender.start();
+            sender.join(REQUEST_TIMEOUT_MS);
+
+            if (sender.isAlive()) {
+                api.logging().logToOutput("Timeout for Request #" + msg.getId() + " / User " + user.getName());
+            } else if (result[0] != null && result[0].response() != null) {
+                responseBytes = result[0].response().toByteArray().getBytes();
+                sentRequest = result[0].request().toByteArray().getBytes();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
+        msg.addRunResult(user, sentRequest, responseBytes);
+    }
+
+    /** Re-evaluate role results based on existing run data. Can be called from UI after checkbox changes. */
+    public static void evaluateRoleResults(MatrixDB db, MessageEntry msg) {
         List<RoleEntry> authorizedRoles = new ArrayList<>();
         for (RoleEntry role : db.getAllRoles()) {
             if (msg.isRoleAuthorized(role)) authorizedRoles.add(role);
         }
         for (RoleEntry role : db.getAllRoles()) {
-            boolean passed = checkResult(msg, role, authorizedRoles);
+            boolean passed = checkResult(db, msg, role, authorizedRoles);
             msg.setRoleResult(role, passed);
         }
     }
@@ -176,7 +221,7 @@ public class RunEngine {
      * Evaluate whether the results for a given role meet expectations.
      * Returns true if all users exclusively in this role behaved as expected.
      */
-    private boolean checkResult(MessageEntry msg, RoleEntry role, List<RoleEntry> authorizedRoles) {
+    private static boolean checkResult(MatrixDB db, MessageEntry msg, RoleEntry role, List<RoleEntry> authorizedRoles) {
         for (UserEntry user : db.getUsers()) {
             if (!user.isEnabled()) continue;
             if (!user.hasRole(role)) continue;
