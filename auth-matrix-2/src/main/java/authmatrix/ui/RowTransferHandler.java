@@ -54,10 +54,8 @@ public class RowTransferHandler extends TransferHandler {
 
     @Override
     protected void exportDone(JComponent source, Transferable data, int action) {
-        table.getModel().fireTableDataChanged();
+        if (table.getModel() instanceof javax.swing.table.AbstractTableModel model) {
+            model.fireTableStructureChanged();
+        }
     }
-
-    // Workaround: fireTableDataChanged is not accessible on AbstractTableModel via getModel(),
-    // so the owning code should call redraw after a drop. The exportDone serves as a trigger
-    // but relies on the table model being cast-friendly.
 }

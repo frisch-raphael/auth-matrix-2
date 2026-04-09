@@ -33,10 +33,13 @@ public class AuthMatrixTab extends JPanel {
     private final JTabbedPane viewerTabs;
     private final JButton runButton;
     private final JButton cancelButton;
+    private final JLabel statusLabel;
     private final JFileChooser fileChooser = new JFileChooser();
 
-    // Track the editable original-request editor for saving user modifications
     private final Map<MessageEntry, HttpRequestEditor> editableEditors = new HashMap<>();
+
+    private TableCellRenderer origUserStringRenderer;
+    private TableCellRenderer origUserBooleanRenderer;
 
     public AuthMatrixTab(MontoyaApi api, MatrixDB db) {
         super(new BorderLayout());
@@ -66,7 +69,7 @@ public class AuthMatrixTab extends JPanel {
         messageTable.setTransferHandler(new RowTransferHandler(messageTable, db, true));
         messageTable.getTableHeader().setReorderingAllowed(false);
 
-        // --- Viewer Tabs (bottom) ---
+        // --- Viewer Tabs ---
         viewerTabs = new JTabbedPane();
 
         // --- Buttons ---
@@ -80,6 +83,10 @@ public class AuthMatrixTab extends JPanel {
         JButton loadBtn = new JButton("Load");
         JButton clearBtn = new JButton("Clear");
 
+        statusLabel = new JLabel(" ");
+        statusLabel.setFont(statusLabel.getFont().deriveFont(Font.ITALIC));
+        statusLabel.setForeground(new Color(0x66, 0x66, 0x99));
+
         runButton.addActionListener(e -> onRun());
         cancelButton.addActionListener(e -> engine.cancel());
         newUserBtn.addActionListener(e -> onNewUser());
@@ -89,17 +96,21 @@ public class AuthMatrixTab extends JPanel {
         loadBtn.addActionListener(e -> onLoad());
         clearBtn.addActionListener(e -> onClear());
 
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        buttons.add(runButton);
-        buttons.add(cancelButton);
-        buttons.add(createSeparator());
-        buttons.add(newUserBtn);
-        buttons.add(newRoleBtn);
-        buttons.add(newHeaderBtn);
-        buttons.add(createSeparator());
-        buttons.add(saveBtn);
-        buttons.add(loadBtn);
-        buttons.add(clearBtn);
+        JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        buttonRow.add(runButton);
+        buttonRow.add(cancelButton);
+        buttonRow.add(createSeparator());
+        buttonRow.add(newUserBtn);
+        buttonRow.add(newRoleBtn);
+        buttonRow.add(newHeaderBtn);
+        buttonRow.add(createSeparator());
+        buttonRow.add(saveBtn);
+        buttonRow.add(loadBtn);
+        buttonRow.add(clearBtn);
+
+        JPanel buttons = new JPanel(new BorderLayout());
+        buttons.add(buttonRow, BorderLayout.CENTER);
+        buttons.add(statusLabel, BorderLayout.SOUTH);
 
         // --- Popup Menus ---
         installMessagePopup();
@@ -123,29 +134,36 @@ public class AuthMatrixTab extends JPanel {
 
         add(mainSplit, BorderLayout.CENTER);
 
+        origUserStringRenderer = userTable.getDefaultRenderer(String.class);
+        origUserBooleanRenderer = userTable.getDefaultRenderer(Boolean.class);
         applyRenderers();
     }
 
     // --- Renderers ---
 
     private void applyRenderers() {
-        messageTable.setDefaultRenderer(Boolean.class,
-                new Renderers.ResultCheckboxRenderer(messageTable.getDefaultRenderer(Boolean.class), db));
-        messageTable.setDefaultRenderer(String.class,
-                new Renderers.RegexCellRenderer(db));
-        userTable.setDefaultRenderer(String.class,
-                new Renderers.UserCellRenderer(userTable.getDefaultRenderer(String.class), db));
-        userTable.setDefaultRenderer(Boolean.class,
-                new Renderers.UserCellRenderer(userTable.getDefaultRenderer(Boolean.class), db));
+        messageTable.setDefaultRenderer(Boolean.class, new Renderers.ResultCheckboxRenderer(db));
+        messageTable.setDefaultRenderer(String.class, new Renderers.RegexCellRenderer(db));
+        userTable.setDefaultRenderer(String.class, new Renderers.UserCellRenderer(origUserStringRenderer, db));
+        userTable.setDefaultRenderer(Boolean.class, new Renderers.UserCellRenderer(origUserBooleanRenderer, db));
     }
 
     public void redrawAll() {
-        saveEditorChanges();
-        userModel.fireTableStructureChanged();
-        messageModel.fireTableStructureChanged();
-        applyRenderers();
-        applyMessageColumnWidths();
-        applyUserColumnWidths();
+        Runnable doRedraw = () -> {
+            saveEditorChanges();
+            userModel.fireTableStructureChanged();
+            messageModel.fireTableStructureChanged();
+            applyRenderers();
+            applyMessageColumnWidths();
+            applyUserColumnWidths();
+            messageTable.repaint();
+            userTable.repaint();
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            doRedraw.run();
+        } else {
+            SwingUtilities.invokeLater(doRedraw);
+        }
     }
 
     private void applyMessageColumnWidths() {
@@ -155,14 +173,11 @@ public class AuthMatrixTab extends JPanel {
             messageTable.getColumnModel().getColumn(1).setMinWidth(300);
             messageTable.getColumnModel().getColumn(2).setMinWidth(150);
         }
-        // Regex combobox editor
         if (messageTable.getColumnCount() > 2) {
             JComboBox<String> regexCombo = new JComboBox<>(db.getKnownRegexes().toArray(new String[0]));
             regexCombo.setEditable(true);
             messageTable.getColumnModel().getColumn(2).setCellEditor(new DefaultCellEditor(regexCombo));
         }
-        messageTable.getTableHeader().getDefaultRenderer().getTableCellRendererComponent(
-                messageTable, "", false, false, -1, 0);
     }
 
     private void applyUserColumnWidths() {
@@ -174,29 +189,25 @@ public class AuthMatrixTab extends JPanel {
         }
     }
 
-    // --- Message Selection -> Viewer Tabs ---
+    // --- Message Selection ---
 
     private void onMessageSelected(int row) {
         saveEditorChanges();
         viewerTabs.removeAll();
         editableEditors.clear();
-
         if (db.getLock().isLocked()) return;
         if (row < 0 || row >= db.getMessages().size()) return;
 
         MessageEntry msg = db.getMessages().get(row);
-
-        // Original tab (editable request)
         JTabbedPane originalTab = createViewerTab(msg, true);
-        originalTab.setSelectedIndex(0); // default to Request tab
+        originalTab.setSelectedIndex(0);
         viewerTabs.addTab("Original", originalTab);
 
-        // Per-user result tabs
         for (UserEntry user : db.getUsers()) {
             MessageEntry.RunResult run = msg.getUserRuns().get(user);
             if (run != null) {
                 JTabbedPane userTab = createViewerTab(msg, run);
-                userTab.setSelectedIndex(1); // default to Response tab
+                userTab.setSelectedIndex(1);
                 viewerTabs.addTab(user.getName(), userTab);
             }
         }
@@ -207,16 +218,10 @@ public class AuthMatrixTab extends JPanel {
                 ? api.userInterface().createHttpRequestEditor()
                 : api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
         HttpResponseEditor respEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
-
-        if (msg.getRequest() != null) {
-            reqEditor.setRequest(buildHttpRequest(msg));
-        }
-        if (msg.getResponse() != null) {
+        if (msg.getRequest() != null) reqEditor.setRequest(buildHttpRequest(msg));
+        if (msg.getResponse() != null)
             respEditor.setResponse(HttpResponse.httpResponse(ByteArray.byteArray(msg.getResponse())));
-        }
-
         if (editable) editableEditors.put(msg, reqEditor);
-
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("Request", reqEditor.uiComponent());
         tabs.addTab("Response", respEditor.uiComponent());
@@ -226,30 +231,23 @@ public class AuthMatrixTab extends JPanel {
     private JTabbedPane createViewerTab(MessageEntry msg, MessageEntry.RunResult run) {
         HttpRequestEditor reqEditor = api.userInterface().createHttpRequestEditor(EditorOptions.READ_ONLY);
         HttpResponseEditor respEditor = api.userInterface().createHttpResponseEditor(EditorOptions.READ_ONLY);
-
-        if (run.request() != null) {
+        if (run.request() != null)
             reqEditor.setRequest(HttpRequest.httpRequest(
                     burp.api.montoya.http.HttpService.httpService(msg.getHost(), msg.getPort(), msg.isSecure()),
                     ByteArray.byteArray(run.request())));
-        }
-        if (run.response() != null) {
+        if (run.response() != null)
             respEditor.setResponse(HttpResponse.httpResponse(ByteArray.byteArray(run.response())));
-        }
-
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("Request", reqEditor.uiComponent());
         tabs.addTab("Response", respEditor.uiComponent());
         return tabs;
     }
 
-    /** Save any modifications the user made in the editable request editor. */
     private void saveEditorChanges() {
         for (var entry : editableEditors.entrySet()) {
             HttpRequestEditor editor = entry.getValue();
             if (editor.isModified()) {
-                MessageEntry msg = entry.getKey();
-                HttpRequest modified = editor.getRequest();
-                msg.setRequest(modified.toByteArray().getBytes());
+                entry.getKey().setRequest(editor.getRequest().toByteArray().getBytes());
             }
         }
         editableEditors.clear();
@@ -271,15 +269,11 @@ public class AuthMatrixTab extends JPanel {
         });
         addItem(popup, "Run Request(s)", e -> {
             List<MessageEntry> selected = getSelectedMessages();
-            new Thread(() -> {
-                engine.run(selected, this::setRunning, this::redrawAll);
-            }).start();
+            if (!selected.isEmpty())
+                new Thread(() -> engine.run(selected, this::setRunning, this::setProgress, this::redrawAll)).start();
         });
         addItem(popup, "Toggle Regex Mode (Success/Failure)", e -> {
-            for (MessageEntry msg : getSelectedMessages()) {
-                msg.toggleFailureRegexMode();
-                msg.clearResults();
-            }
+            for (MessageEntry msg : getSelectedMessages()) { msg.toggleFailureRegexMode(); msg.clearResults(); }
             redrawAll();
         });
         addItem(popup, "Change Regexes", e -> onChangeRegexes());
@@ -326,8 +320,7 @@ public class AuthMatrixTab extends JPanel {
                 RoleEntry role = userModel.getRoleForColumn(col);
                 if (role != null) { db.deleteRole(role); redrawAll(); }
             } else if (userModel.isHeaderColumn(col)) {
-                int headerIdx = col - 2; // STATIC_COLS = 2
-                db.deleteHeader(headerIdx);
+                db.deleteHeader(col - 2);
                 redrawAll();
             }
         });
@@ -337,10 +330,7 @@ public class AuthMatrixTab extends JPanel {
     private void bulkSetRole(boolean value) {
         int col = messageTable.columnAtPoint(messageTable.getMousePosition());
         RoleEntry role = messageModel.getRoleForColumn(col);
-        if (role != null) {
-            db.setRoleForAllSelectedMessages(getSelectedMessages(), role, value);
-            redrawAll();
-        }
+        if (role != null) { db.setRoleForAllSelectedMessages(getSelectedMessages(), role, value); redrawAll(); }
     }
 
     // --- Button Actions ---
@@ -348,36 +338,55 @@ public class AuthMatrixTab extends JPanel {
     private void onRun() {
         saveEditorChanges();
         viewerTabs.removeAll();
-        new Thread(() -> engine.run(null, this::setRunning, this::redrawAll)).start();
+        new Thread(() -> engine.run(null, this::setRunning, this::setProgress, this::redrawAll)).start();
     }
 
     private void setRunning(boolean running) {
+        SwingUtilities.invokeLater(() -> { runButton.setEnabled(!running); cancelButton.setEnabled(running); });
+    }
+
+    private void setProgress(String text) {
+        SwingUtilities.invokeLater(() -> statusLabel.setText(text == null || text.isEmpty() ? " " : text));
+    }
+
+    public void highlightTab() {
         SwingUtilities.invokeLater(() -> {
-            runButton.setEnabled(!running);
-            cancelButton.setEnabled(running);
+            Container parent = this.getParent();
+            while (parent != null && !(parent instanceof JTabbedPane)) parent = parent.getParent();
+            if (parent instanceof JTabbedPane tabbedPane) {
+                int index = tabbedPane.indexOfComponent(this);
+                if (index >= 0) {
+                    Color original = tabbedPane.getBackgroundAt(index);
+                    tabbedPane.setBackgroundAt(index, new Color(0xFF, 0x66, 0x33));
+                    javax.swing.Timer timer = new javax.swing.Timer(3000, e -> tabbedPane.setBackgroundAt(index, original));
+                    timer.setRepeats(false);
+                    timer.start();
+                }
+            }
+        });
+    }
+
+    public void scrollToLastMessage() {
+        SwingUtilities.invokeLater(() -> {
+            int lastRow = messageTable.getRowCount() - 1;
+            if (lastRow >= 0) {
+                messageTable.scrollRectToVisible(messageTable.getCellRect(lastRow, 0, true));
+                messageTable.setRowSelectionInterval(lastRow, lastRow);
+            }
         });
     }
 
     private void onNewUser() {
         String name = JOptionPane.showInputDialog(this, "Enter New User:");
-        if (name != null && !name.trim().isEmpty()) {
-            db.getOrCreateUser(name.trim());
-            redrawAll();
-        }
+        if (name != null && !name.trim().isEmpty()) { db.getOrCreateUser(name.trim()); redrawAll(); }
     }
 
     private void onNewRole() {
         String name = JOptionPane.showInputDialog(this, "Enter New Role:");
-        if (name != null && !name.trim().isEmpty()) {
-            db.getOrCreateRole(name.trim());
-            redrawAll();
-        }
+        if (name != null && !name.trim().isEmpty()) { db.getOrCreateRole(name.trim()); redrawAll(); }
     }
 
-    private void onNewHeader() {
-        db.addHeader();
-        redrawAll();
-    }
+    private void onNewHeader() { db.addHeader(); redrawAll(); }
 
     private void onSave() {
         saveEditorChanges();
@@ -385,64 +394,45 @@ public class AuthMatrixTab extends JPanel {
         if (result != JFileChooser.APPROVE_OPTION) return;
         File file = fileChooser.getSelectedFile();
         if (file.exists()) {
-            int confirm = JOptionPane.showConfirmDialog(this,
-                    "The file exists, overwrite?", "Existing File", JOptionPane.YES_NO_OPTION);
+            int confirm = JOptionPane.showConfirmDialog(this, "The file exists, overwrite?", "Existing File", JOptionPane.YES_NO_OPTION);
             if (confirm != JOptionPane.YES_OPTION) return;
         }
-        try {
-            StateManager.save(db, file);
-        } catch (IOException ex) {
+        try { StateManager.save(db, file); }
+        catch (IOException ex) {
             api.logging().logToError("Save failed: " + ex.getMessage());
-            JOptionPane.showMessageDialog(this, "Save failed: " + ex.getMessage(),
-                    "Error", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Save failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
     private void onLoad() {
         int result = fileChooser.showOpenDialog(this);
         if (result != JFileChooser.APPROVE_OPTION) return;
-        try {
-            StateManager.load(db, fileChooser.getSelectedFile());
-            redrawAll();
-        } catch (IOException ex) {
+        try { StateManager.load(db, fileChooser.getSelectedFile()); redrawAll(); }
+        catch (IOException ex) {
             api.logging().logToError("Load failed: " + ex.getMessage());
-            JOptionPane.showMessageDialog(this, "Load failed: " + ex.getMessage(),
-                    "Error", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Load failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 
     private void onClear() {
-        int result = JOptionPane.showConfirmDialog(this,
-                "Clear AuthMatrix Configuration?", "Clear Config", JOptionPane.YES_NO_OPTION);
-        if (result == JOptionPane.YES_OPTION) {
-            db.clear();
-            viewerTabs.removeAll();
-            editableEditors.clear();
-            redrawAll();
-        }
+        int result = JOptionPane.showConfirmDialog(this, "Clear AuthMatrix Configuration?", "Clear Config", JOptionPane.YES_NO_OPTION);
+        if (result == JOptionPane.YES_OPTION) { db.clear(); viewerTabs.removeAll(); editableEditors.clear(); redrawAll(); }
     }
 
     private void onChangeRegexes() {
         JComboBox<String> regexCombo = new JComboBox<>(db.getKnownRegexes().toArray(new String[0]));
         regexCombo.setEditable(true);
         JCheckBox failureMode = new JCheckBox("Regex Detects Unauthorized Requests (Failure Mode)");
-
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.add(new JLabel("Select a Regex for all selected Requests:"));
         panel.add(regexCombo);
         panel.add(failureMode);
-
-        int result = JOptionPane.showConfirmDialog(this, panel,
-                "Select Response Regex", JOptionPane.OK_CANCEL_OPTION);
+        int result = JOptionPane.showConfirmDialog(this, panel, "Select Response Regex", JOptionPane.OK_CANCEL_OPTION);
         if (result != JOptionPane.OK_OPTION) return;
         String regex = (String) regexCombo.getSelectedItem();
         if (regex == null || regex.isEmpty()) return;
-
-        for (MessageEntry msg : getSelectedMessages()) {
-            msg.setRegex(regex);
-            msg.setFailureRegexMode(failureMode.isSelected());
-        }
+        for (MessageEntry msg : getSelectedMessages()) { msg.setRegex(regex); msg.setFailureRegexMode(failureMode.isSelected()); }
         db.addRegexIfNew(regex);
         redrawAll();
     }
@@ -450,50 +440,32 @@ public class AuthMatrixTab extends JPanel {
     private void onChangeDomain() {
         List<MessageEntry> selected = getSelectedMessages();
         if (selected.isEmpty()) return;
-
-        // Autofill from first message
         MessageEntry first = selected.get(0);
         JTextField hostField = new JTextField(first.getHost(), 25);
         JTextField portField = new JTextField(String.valueOf(first.getPort()), 25);
         JCheckBox tlsBox = new JCheckBox("Use HTTPS", first.isSecure());
         JCheckBox replaceHostBox = new JCheckBox("Replace Host in HTTP header", true);
-
         tlsBox.addItemListener(e -> {
-            if (e.getStateChange() == ItemEvent.SELECTED && "80".equals(portField.getText()))
-                portField.setText("443");
-            else if (e.getStateChange() == ItemEvent.DESELECTED && "443".equals(portField.getText()))
-                portField.setText("80");
+            if (e.getStateChange() == ItemEvent.SELECTED && "80".equals(portField.getText())) portField.setText("443");
+            else if (e.getStateChange() == ItemEvent.DESELECTED && "443".equals(portField.getText())) portField.setText("80");
         });
-
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.add(labeled("Host:", hostField));
         panel.add(labeled("Port:", portField));
         panel.add(tlsBox);
         panel.add(replaceHostBox);
-
-        int result = JOptionPane.showConfirmDialog(this, panel,
-                "Configure target details", JOptionPane.OK_CANCEL_OPTION);
+        int result = JOptionPane.showConfirmDialog(this, panel, "Configure target details", JOptionPane.OK_CANCEL_OPTION);
         if (result != JOptionPane.OK_OPTION) return;
-
         String host = hostField.getText().trim();
         if (host.isEmpty()) return;
         int port;
-        try {
-            port = Integer.parseInt(portField.getText().trim());
-        } catch (NumberFormatException ex) {
-            port = tlsBox.isSelected() ? 443 : 80;
-        }
+        try { port = Integer.parseInt(portField.getText().trim()); }
+        catch (NumberFormatException ex) { port = tlsBox.isSelected() ? 443 : 80; }
         boolean secure = tlsBox.isSelected();
-
         for (MessageEntry msg : selected) {
-            if (replaceHostBox.isSelected() && msg.getRequest() != null) {
-                msg.setRequest(RunEngine.replaceHostHeader(msg.getRequest(), host));
-            }
-            msg.setHost(host);
-            msg.setPort(port);
-            msg.setSecure(secure);
-            msg.clearResults();
+            if (replaceHostBox.isSelected() && msg.getRequest() != null) msg.setRequest(RunEngine.replaceHostHeader(msg.getRequest(), host));
+            msg.setHost(host); msg.setPort(port); msg.setSecure(secure); msg.clearResults();
         }
         redrawAll();
     }
@@ -504,17 +476,14 @@ public class AuthMatrixTab extends JPanel {
         int[] rows = messageTable.getSelectedRows();
         List<MessageEntry> result = new ArrayList<>();
         for (int row : rows) {
-            if (row >= 0 && row < db.getMessages().size()) {
-                result.add(db.getMessages().get(row));
-            }
+            if (row >= 0 && row < db.getMessages().size()) result.add(db.getMessages().get(row));
         }
         return result;
     }
 
     private static JPanel labeled(String label, JComponent field) {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        p.add(new JLabel(label));
-        p.add(field);
+        p.add(new JLabel(label)); p.add(field);
         return p;
     }
 

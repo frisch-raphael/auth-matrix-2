@@ -30,8 +30,10 @@ public class RunEngine {
     /**
      * Run messages. If messagesToRun is null, runs all enabled messages.
      * Callbacks are invoked on the calling thread (expected to be a background thread).
+     * @param onProgress receives status strings like "Request 2/5 - User 3/4 (alice)"
      */
-    public void run(List<MessageEntry> messagesToRun, Consumer<Boolean> onRunningChanged, Runnable onComplete) {
+    public void run(List<MessageEntry> messagesToRun, Consumer<Boolean> onRunningChanged,
+                    Consumer<String> onProgress, Runnable onComplete) {
         db.getLock().lock();
         try {
             onRunningChanged.accept(true);
@@ -41,29 +43,45 @@ public class RunEngine {
                     ? messagesToRun
                     : new ArrayList<>(db.getMessages());
 
-            // Clear previous results for targeted messages
-            for (MessageEntry msg : targets) msg.clearResults();
-
+            // Only count enabled targets
+            List<MessageEntry> enabledTargets = new ArrayList<>();
             for (MessageEntry msg : db.getMessages()) {
+                if (targets.contains(msg) && msg.isEnabled()) enabledTargets.add(msg);
+            }
+
+            // Clear previous results for targeted messages
+            for (MessageEntry msg : enabledTargets) msg.clearResults();
+
+            int msgNum = 0;
+            int totalMessages = enabledTargets.size();
+            for (MessageEntry msg : enabledTargets) {
                 if (cancelled) break;
-                if (!targets.contains(msg) || !msg.isEnabled()) continue;
-                runMessage(msg);
+                msgNum++;
+                runMessage(msg, msgNum, totalMessages, onProgress);
             }
         } catch (Exception e) {
             api.logging().logToError("Run error: " + e.getMessage());
         } finally {
             onRunningChanged.accept(false);
+            onProgress.accept("");
             db.getLock().unlock();
             onComplete.run();
         }
     }
 
-    private void runMessage(MessageEntry msg) {
+    private void runMessage(MessageEntry msg, int msgNum, int totalMessages, Consumer<String> onProgress) {
         msg.clearResults();
+
+        List<UserEntry> enabledUsers = db.getUsers().stream().filter(UserEntry::isEnabled).toList();
+        int userNum = 0;
+        int totalUsers = enabledUsers.size();
 
         for (UserEntry user : db.getUsers()) {
             if (cancelled) return;
             if (!user.isEnabled()) continue;
+            userNum++;
+            onProgress.accept(String.format("Request %d/%d — User %d/%d (%s)",
+                    msgNum, totalMessages, userNum, totalUsers, user.getName()));
 
             HttpRequest request = buildModifiedRequest(msg, user);
             byte[] sentRequest = request.toByteArray().getBytes();
