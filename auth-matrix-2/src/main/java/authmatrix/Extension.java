@@ -15,7 +15,6 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -34,47 +33,46 @@ public class Extension implements BurpExtension {
         AuthMatrixContextMenu contextMenu = new AuthMatrixContextMenu(api, db, tab);
         api.userInterface().registerContextMenuItemsProvider(contextMenu);
 
-        // Global keyboard shortcut: Ctrl+Shift+M sends last right-clicked selection to AuthMatrix
-        KeyboardShortcutHandler shortcutHandler = new KeyboardShortcutHandler(api, db, tab, contextMenu);
+        KeyboardShortcutHandler shortcutHandler = new KeyboardShortcutHandler(contextMenu);
         KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(shortcutHandler);
 
-        // Clean up the dispatcher on extension unload
-        api.extension().registerUnloadingHandler(() -> {
-            KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(shortcutHandler);
-        });
+        api.extension().registerUnloadingHandler(() ->
+                KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(shortcutHandler));
 
-        api.logging().logToOutput("AuthMatrix v" + VERSION + " loaded. Shortcut: Ctrl+Shift+M to send last right-clicked request(s).");
+        api.logging().logToOutput("AuthMatrix v" + VERSION + " loaded. Use Ctrl+Shift+M to send selected request(s).");
     }
 
     // --- Keyboard Shortcut ---
+    // When Ctrl+Shift+M is pressed, we simulate a right-click via Robot.
+    // This triggers Burp's context menu mechanism which calls provideMenuItems
+    // with the correct current selection. We intercept it there, send to AuthMatrix,
+    // and dismiss the context menu.
 
     private static class KeyboardShortcutHandler implements KeyEventDispatcher {
-        private final MontoyaApi api;
-        private final MatrixDB db;
-        private final AuthMatrixTab tab;
         private final AuthMatrixContextMenu contextMenu;
 
-        KeyboardShortcutHandler(MontoyaApi api, MatrixDB db, AuthMatrixTab tab, AuthMatrixContextMenu contextMenu) {
-            this.api = api;
-            this.db = db;
-            this.tab = tab;
+        KeyboardShortcutHandler(AuthMatrixContextMenu contextMenu) {
             this.contextMenu = contextMenu;
         }
 
         @Override
         public boolean dispatchKeyEvent(KeyEvent e) {
-            // Ctrl+Shift+M on key press
             if (e.getID() != KeyEvent.KEY_PRESSED) return false;
             if (!e.isControlDown() || !e.isShiftDown() || e.getKeyCode() != KeyEvent.VK_M) return false;
 
-            List<HttpRequestResponse> lastSelection = contextMenu.getLastSelection();
-            if (lastSelection == null || lastSelection.isEmpty()) {
-                api.logging().logToOutput("No request selection available. Right-click on request(s) first, then use Ctrl+Shift+M.");
-                return true; // consumed
+            contextMenu.pendingKeyboardSend = true;
+            try {
+                Robot robot = new Robot();
+                robot.mousePress(InputEvent.BUTTON3_DOWN_MASK);
+                robot.mouseRelease(InputEvent.BUTTON3_DOWN_MASK);
+            } catch (AWTException ex) {
+                contextMenu.pendingKeyboardSend = false;
             }
-
-            sendToAuthMatrix(api, db, tab, lastSelection);
-            return true; // consumed
+            // Safety: reset flag if provideMenuItems wasn't called within 500ms
+            javax.swing.Timer timeout = new javax.swing.Timer(500, evt -> contextMenu.pendingKeyboardSend = false);
+            timeout.setRepeats(false);
+            timeout.start();
+            return true;
         }
     }
 
@@ -84,9 +82,7 @@ public class Extension implements BurpExtension {
         private final MontoyaApi api;
         private final MatrixDB db;
         private final AuthMatrixTab tab;
-
-        // Stores the most recent right-click selection for keyboard shortcut use
-        private volatile List<HttpRequestResponse> lastSelection = Collections.emptyList();
+        volatile boolean pendingKeyboardSend = false;
 
         AuthMatrixContextMenu(MontoyaApi api, MatrixDB db, AuthMatrixTab tab) {
             this.api = api;
@@ -94,16 +90,12 @@ public class Extension implements BurpExtension {
             this.tab = tab;
         }
 
-        List<HttpRequestResponse> getLastSelection() {
-            return lastSelection;
-        }
-
         @Override
         public List<Component> provideMenuItems(ContextMenuEvent event) {
             List<HttpRequestResponse> selected = new ArrayList<>(event.selectedRequestResponses());
 
             // Also capture from message editor context (Repeater, etc.)
-            event.messageEditorRequestResponse().ifPresent(editorReqResp ->  {
+            event.messageEditorRequestResponse().ifPresent(editorReqResp -> {
                 HttpRequestResponse reqResp = editorReqResp.requestResponse();
                 if (reqResp != null && !selected.contains(reqResp)) {
                     selected.add(reqResp);
@@ -112,18 +104,24 @@ public class Extension implements BurpExtension {
 
             if (selected.isEmpty()) return List.of();
 
-            // Capture selection for keyboard shortcut
-            lastSelection = List.copyOf(selected);
+            // If triggered by keyboard shortcut: send immediately, suppress context menu
+            if (pendingKeyboardSend) {
+                pendingKeyboardSend = false;
+                SwingUtilities.invokeLater(() -> {
+                    sendToAuthMatrix(api, db, tab, selected);
+                    // Dismiss the context menu that appeared from the simulated right-click
+                    MenuSelectionManager.defaultManager().clearSelectedPath();
+                });
+                return List.of();
+            }
 
+            // Normal right-click: show menu items
             List<Component> items = new ArrayList<>();
 
-            // "Send request(s) to AuthMatrix" with shortcut hint
-            JMenuItem sendItem = new JMenuItem("Send request(s) to AuthMatrix");
-            sendItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_M, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+            JMenuItem sendItem = new JMenuItem("Send request(s) to AuthMatrix    Ctrl+Shift+M");
             sendItem.addActionListener(new SendToAuthMatrixAction(api, db, tab, selected));
             items.add(sendItem);
 
-            // "Send cookies to user" (only for single selection)
             if (selected.size() == 1) {
                 for (UserEntry user : db.getUsers()) {
                     JMenuItem cookieItem = new JMenuItem("Send cookies to AuthMatrix user: " + user.getName());
@@ -147,7 +145,6 @@ public class Extension implements BurpExtension {
             String path = req.path() != null ? req.path() : "/";
             String name = String.format("%-8s%s", method, path);
 
-            // Default regex from response status line
             String regex = "^HTTP/1\\.1 200 OK";
             if (reqResp.response() != null) {
                 String statusLine = reqResp.response().toString().split("\r?\n")[0];
@@ -210,8 +207,6 @@ public class Extension implements BurpExtension {
         @Override
         public void actionPerformed(ActionEvent e) {
             String cookieVal = "";
-
-            // Get Cookie header from request
             if (reqResp.request() != null) {
                 for (HttpHeader header : reqResp.request().headers()) {
                     if (header.name().equalsIgnoreCase("Cookie")) {
@@ -220,8 +215,6 @@ public class Extension implements BurpExtension {
                     }
                 }
             }
-
-            // Get Set-Cookie headers from response
             if (reqResp.response() != null) {
                 StringBuilder setCookies = new StringBuilder();
                 for (HttpHeader header : reqResp.response().headers()) {
@@ -237,7 +230,6 @@ public class Extension implements BurpExtension {
                     cookieVal = RunEngine.mergeCookies(cookieVal, setCookies.toString());
                 }
             }
-
             user.setCookies(cookieVal);
             tab.redrawAll();
         }

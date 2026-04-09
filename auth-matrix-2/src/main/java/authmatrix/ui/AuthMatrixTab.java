@@ -282,6 +282,31 @@ public class AuthMatrixTab extends JPanel {
             for (MessageEntry msg : getSelectedMessages()) db.deleteMessage(msg);
             redrawAll();
         });
+        popup.addSeparator();
+        // Dynamic submenu: bulk toggle role checkboxes for selected rows
+        popup.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
+            private final List<JMenuItem> dynamicItems = new ArrayList<>();
+            @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
+                for (JMenuItem item : dynamicItems) popup.remove(item);
+                dynamicItems.clear();
+                List<MessageEntry> selected = getSelectedMessages();
+                if (selected.size() < 2) return;
+                for (RoleEntry role : db.getAllRoles()) {
+                    boolean allChecked = selected.stream().allMatch(m -> m.isRoleAuthorized(role));
+                    boolean newValue = !allChecked;
+                    String label = (newValue ? "Check" : "Uncheck") + " all for: " + role.getName();
+                    JMenuItem item = new JMenuItem(label);
+                    item.addActionListener(ev -> {
+                        for (MessageEntry msg : selected) msg.setRoleAuthorized(role, newValue);
+                        redrawAll();
+                    });
+                    dynamicItems.add(item);
+                    popup.add(item);
+                }
+            }
+            @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {}
+            @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {}
+        });
         messageTable.setComponentPopupMenu(popup);
     }
 
