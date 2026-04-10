@@ -108,7 +108,7 @@ public class Extension implements BurpExtension {
             if (pendingKeyboardSend) {
                 pendingKeyboardSend = false;
                 SwingUtilities.invokeLater(() -> {
-                    sendToAuthMatrix(api, db, tab, selected);
+                    sendToAuthMatrix(api, db, tab, selected, null);
                     // Dismiss the context menu that appeared from the simulated right-click
                     MenuSelectionManager.defaultManager().clearSelectedPath();
                 });
@@ -118,9 +118,18 @@ public class Extension implements BurpExtension {
             // Normal right-click: show menu items
             List<Component> items = new ArrayList<>();
 
+            // Send to root
             JMenuItem sendItem = new JMenuItem("Send request(s) to AuthMatrix    Ctrl+Shift+M");
-            sendItem.addActionListener(new SendToAuthMatrixAction(api, db, tab, selected));
+            sendItem.addActionListener(new SendToAuthMatrixAction(api, db, tab, selected, null));
             items.add(sendItem);
+
+            // Send to specific section
+            for (SectionEntry section : db.getSections()) {
+                JMenuItem sectionItem = new JMenuItem("Send request(s) to AuthMatrix [" + section.getName() + "]");
+                sectionItem.setForeground(section.getColor());
+                sectionItem.addActionListener(new SendToAuthMatrixAction(api, db, tab, selected, section));
+                items.add(sectionItem);
+            }
 
             if (selected.size() == 1) {
                 for (UserEntry user : db.getUsers()) {
@@ -136,7 +145,8 @@ public class Extension implements BurpExtension {
 
     // --- Shared send logic ---
 
-    static void sendToAuthMatrix(MontoyaApi api, MatrixDB db, AuthMatrixTab tab, List<HttpRequestResponse> selected) {
+    static void sendToAuthMatrix(MontoyaApi api, MatrixDB db, AuthMatrixTab tab,
+                                   List<HttpRequestResponse> selected, SectionEntry section) {
         for (HttpRequestResponse reqResp : selected) {
             HttpRequest req = reqResp.request();
             if (req == null) continue;
@@ -160,7 +170,11 @@ public class Extension implements BurpExtension {
             int port = req.httpService() != null ? req.httpService().port() : 443;
             boolean secure = req.httpService() != null && req.httpService().secure();
 
-            db.createMessage(host, port, secure, requestBytes, responseBytes, name, regex);
+            if (section != null) {
+                db.createMessageInSection(section, host, port, secure, requestBytes, responseBytes, name, regex);
+            } else {
+                db.createMessage(host, port, secure, requestBytes, responseBytes, name, regex);
+            }
         }
         tab.redrawAll();
         tab.highlightTab();
@@ -174,17 +188,20 @@ public class Extension implements BurpExtension {
         private final MatrixDB db;
         private final AuthMatrixTab tab;
         private final List<HttpRequestResponse> selected;
+        private final SectionEntry section;
 
-        SendToAuthMatrixAction(MontoyaApi api, MatrixDB db, AuthMatrixTab tab, List<HttpRequestResponse> selected) {
+        SendToAuthMatrixAction(MontoyaApi api, MatrixDB db, AuthMatrixTab tab,
+                               List<HttpRequestResponse> selected, SectionEntry section) {
             this.api = api;
             this.db = db;
             this.tab = tab;
             this.selected = selected;
+            this.section = section;
         }
 
         @Override
         public void actionPerformed(ActionEvent e) {
-            sendToAuthMatrix(api, db, tab, selected);
+            sendToAuthMatrix(api, db, tab, selected, section);
         }
     }
 

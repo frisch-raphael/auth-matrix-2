@@ -19,7 +19,7 @@ public class MessageTableModel extends AbstractTableModel {
 
     @Override
     public int getRowCount() {
-        return db.getMessages().size();
+        return db.getRows().size();
     }
 
     @Override
@@ -38,7 +38,11 @@ public class MessageTableModel extends AbstractTableModel {
 
     @Override
     public Object getValueAt(int row, int col) {
-        MessageEntry msg = db.getMessages().get(row);
+        Object obj = db.getRows().get(row);
+        if (obj instanceof SectionEntry s) {
+            return col == COL_NAME ? "\u25BC " + s.getName() : "";
+        }
+        MessageEntry msg = (MessageEntry) obj;
         if (col == COL_ID) return String.valueOf(msg.getId());
         if (col == COL_NAME) return msg.getName();
         if (col == COL_REGEX) return msg.getRegex();
@@ -49,23 +53,28 @@ public class MessageTableModel extends AbstractTableModel {
     @Override
     public void setValueAt(Object val, int row, int col) {
         if (db.getLock().isLocked()) return;
-        MessageEntry msg = db.getMessages().get(row);
+        Object obj = db.getRows().get(row);
+        if (obj instanceof SectionEntry s) {
+            if (col == COL_NAME) {
+                String text = ((String) val).replaceAll("^\u25BC\\s*", "");
+                s.setName(text);
+            }
+            fireTableCellUpdated(row, col);
+            return;
+        }
+        MessageEntry msg = (MessageEntry) obj;
         if (col == COL_NAME) {
             msg.setName((String) val);
         } else if (col == COL_REGEX) {
             msg.setRegex((String) val);
             db.addRegexIfNew((String) val);
-            // Clear results when regex changes
             msg.clearResults();
             fireRoleColumnsUpdated(row);
         } else if (col >= STATIC_COLS) {
             RoleEntry role = getRoleForColumn(col);
             if (role != null) {
                 msg.setRoleAuthorized(role, (Boolean) val);
-                // Re-evaluate colors if we have run results, rather than clearing them
-                if (!msg.getUserRuns().isEmpty()) {
-                    reEvaluateRoleResults(msg);
-                }
+                if (!msg.getUserRuns().isEmpty()) RunEngine.evaluateRoleResults(db, msg);
                 fireRoleColumnsUpdated(row);
             }
         }
@@ -74,13 +83,17 @@ public class MessageTableModel extends AbstractTableModel {
 
     @Override
     public boolean isCellEditable(int row, int col) {
-        return col >= COL_NAME; // ID is not editable
+        Object obj = db.getRows().get(row);
+        if (obj instanceof SectionEntry) return col == COL_NAME;
+        return col >= COL_NAME;
     }
 
     @Override
     public Class<?> getColumnClass(int col) {
         return col < STATIC_COLS ? String.class : Boolean.class;
     }
+
+    // --- Helpers ---
 
     public RoleEntry getRoleForColumn(int col) {
         int roleIdx = col - STATIC_COLS;
@@ -89,17 +102,23 @@ public class MessageTableModel extends AbstractTableModel {
         return null;
     }
 
-    public boolean isRoleColumn(int col) {
-        return col >= STATIC_COLS;
+    public boolean isRoleColumn(int col) { return col >= STATIC_COLS; }
+
+    public boolean isSectionRow(int row) {
+        return row >= 0 && row < db.getRows().size() && db.getRows().get(row) instanceof SectionEntry;
     }
 
-    private void reEvaluateRoleResults(MessageEntry msg) {
-        RunEngine.evaluateRoleResults(db, msg);
+    public SectionEntry getSectionAt(int row) {
+        if (isSectionRow(row)) return (SectionEntry) db.getRows().get(row);
+        return null;
+    }
+
+    public MessageEntry getMessageAt(int row) {
+        if (row >= 0 && row < db.getRows().size() && db.getRows().get(row) instanceof MessageEntry m) return m;
+        return null;
     }
 
     private void fireRoleColumnsUpdated(int row) {
-        for (int i = STATIC_COLS; i < getColumnCount(); i++) {
-            fireTableCellUpdated(row, i);
-        }
+        for (int i = STATIC_COLS; i < getColumnCount(); i++) fireTableCellUpdated(row, i);
     }
 }

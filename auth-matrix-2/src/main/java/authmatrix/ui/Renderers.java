@@ -21,10 +21,8 @@ public final class Renderers {
     private static final Color FAILURE_REGEX   = new Color(0x99, 0x99, 0xCC);
 
     public static class ResultCheckboxRenderer extends JCheckBox implements TableCellRenderer {
-        private final MatrixDB db;
 
-        public ResultCheckboxRenderer(MatrixDB db) {
-            this.db = db;
+        public ResultCheckboxRenderer() {
             setOpaque(true);
             setHorizontalAlignment(CENTER);
         }
@@ -36,10 +34,9 @@ public final class Renderers {
             setForeground(isSelected ? table.getSelectionForeground() : table.getForeground());
             setBackground(isSelected ? table.getSelectionBackground() : table.getBackground());
 
-            MessageTableModel model = (MessageTableModel) table.getModel();
-            if (!model.isRoleColumn(col)) return this;
-            if (row < 0 || row >= db.getMessages().size()) return this;
-            MessageEntry msg = db.getMessages().get(row);
+            SectionMessageTableModel model = (SectionMessageTableModel) table.getModel();
+            MessageEntry msg = model.getMessageAt(row);
+            if (msg == null || !model.isRoleColumn(col)) return this;
 
             if (!msg.isEnabled()) {
                 setBackground(isSelected ? DISABLED_SEL : DISABLED);
@@ -47,32 +44,27 @@ public final class Renderers {
             }
 
             RoleEntry role = model.getRoleForColumn(col);
-            if (role == null || !msg.getRoleResults().containsKey(role)) return this;
-
-            boolean passed = msg.getRoleResults().get(role);
-            boolean authorized = msg.isRoleAuthorized(role);
-            if (passed) {
-                setBackground(isSelected ? GREEN_SELECTED : GREEN);
-            } else if (authorized) {
-                setBackground(isSelected ? BLUE_SELECTED : BLUE);
-            } else {
-                setBackground(isSelected ? RED_SELECTED : RED);
+            if (role != null && msg.getRoleResults().containsKey(role)) {
+                boolean passed = msg.getRoleResults().get(role);
+                boolean authorized = msg.isRoleAuthorized(role);
+                if (passed) setBackground(isSelected ? GREEN_SELECTED : GREEN);
+                else if (authorized) setBackground(isSelected ? BLUE_SELECTED : BLUE);
+                else setBackground(isSelected ? RED_SELECTED : RED);
             }
             return this;
         }
     }
 
     public static class RegexCellRenderer extends DefaultTableCellRenderer {
-        private final MatrixDB db;
-
-        public RegexCellRenderer(MatrixDB db) { this.db = db; }
 
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value,
                 boolean isSelected, boolean hasFocus, int row, int col) {
             Component cell = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col);
-            if (row < 0 || row >= db.getMessages().size()) return cell;
-            MessageEntry msg = db.getMessages().get(row);
+            SectionMessageTableModel model = (SectionMessageTableModel) table.getModel();
+            MessageEntry msg = model.getMessageAt(row);
+            if (msg == null) return cell;
+
             if (!msg.isEnabled()) {
                 cell.setBackground(isSelected ? DISABLED_SEL : DISABLED);
             } else if (col == MessageTableModel.COL_REGEX && msg.isFailureRegexMode()) {

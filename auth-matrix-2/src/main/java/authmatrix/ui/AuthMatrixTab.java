@@ -4,7 +4,6 @@ import authmatrix.model.*;
 import authmatrix.RunEngine;
 import authmatrix.StateManager;
 import burp.api.montoya.MontoyaApi;
-import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.core.ByteArray;
@@ -13,7 +12,6 @@ import burp.api.montoya.ui.editor.HttpResponseEditor;
 import burp.api.montoya.ui.editor.EditorOptions;
 
 import javax.swing.*;
-import javax.swing.event.*;
 import javax.swing.table.*;
 import java.awt.*;
 import java.awt.event.*;
@@ -27,17 +25,21 @@ public class AuthMatrixTab extends JPanel {
     private final RunEngine engine;
 
     private final JTable userTable;
-    private final JTable messageTable;
     private final UserTableModel userModel;
-    private final MessageTableModel messageModel;
     private final JTabbedPane viewerTabs;
     private final JButton runButton;
     private final JButton cancelButton;
     private final JLabel statusLabel;
     private final JFileChooser fileChooser = new JFileChooser();
 
-    private final Map<MessageEntry, HttpRequestEditor> editableEditors = new HashMap<>();
+    // Multi-table section UI
+    private final Box sectionsBox = new Box(BoxLayout.Y_AXIS);
+    private final JScrollPane messageScrollPane;
+    private final List<SectionPanel> sectionPanels = new ArrayList<>();
+    private JTable activeMessageTable;
+    private TableColumnModel sharedColumnModel;
 
+    private final Map<MessageEntry, HttpRequestEditor> editableEditors = new HashMap<>();
     private TableCellRenderer origUserStringRenderer;
     private TableCellRenderer origUserBooleanRenderer;
 
@@ -55,19 +57,9 @@ public class AuthMatrixTab extends JPanel {
         userTable.setTransferHandler(new RowTransferHandler(userTable, db, false));
         userTable.getTableHeader().setReorderingAllowed(false);
 
-        // --- Message Table ---
-        messageModel = new MessageTableModel(db);
-        messageTable = new JTable(messageModel) {
-            @Override
-            public void changeSelection(int row, int col, boolean toggle, boolean extend) {
-                super.changeSelection(row, col, toggle, extend);
-                onMessageSelected(row);
-            }
-        };
-        messageTable.setDragEnabled(true);
-        messageTable.setDropMode(DropMode.INSERT_ROWS);
-        messageTable.setTransferHandler(new RowTransferHandler(messageTable, db, true));
-        messageTable.getTableHeader().setReorderingAllowed(false);
+        // --- Message sections container ---
+        messageScrollPane = new JScrollPane(sectionsBox);
+        messageScrollPane.getVerticalScrollBar().setUnitIncrement(16);
 
         // --- Viewer Tabs ---
         viewerTabs = new JTabbedPane();
@@ -79,6 +71,7 @@ public class AuthMatrixTab extends JPanel {
         JButton newUserBtn = new JButton("New User");
         JButton newRoleBtn = new JButton("New Role");
         JButton newHeaderBtn = new JButton("New Header");
+        JButton newSectionBtn = new JButton("New Section");
         JButton saveBtn = new JButton("Save");
         JButton loadBtn = new JButton("Load");
         JButton clearBtn = new JButton("Clear");
@@ -92,38 +85,27 @@ public class AuthMatrixTab extends JPanel {
         newUserBtn.addActionListener(e -> onNewUser());
         newRoleBtn.addActionListener(e -> onNewRole());
         newHeaderBtn.addActionListener(e -> onNewHeader());
+        newSectionBtn.addActionListener(e -> onNewSection());
         saveBtn.addActionListener(e -> onSave());
         loadBtn.addActionListener(e -> onLoad());
         clearBtn.addActionListener(e -> onClear());
 
         JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        buttonRow.add(runButton);
-        buttonRow.add(cancelButton);
+        buttonRow.add(runButton); buttonRow.add(cancelButton);
         buttonRow.add(createSeparator());
-        buttonRow.add(newUserBtn);
-        buttonRow.add(newRoleBtn);
-        buttonRow.add(newHeaderBtn);
+        buttonRow.add(newUserBtn); buttonRow.add(newRoleBtn);
+        buttonRow.add(newHeaderBtn); buttonRow.add(newSectionBtn);
         buttonRow.add(createSeparator());
-        buttonRow.add(saveBtn);
-        buttonRow.add(loadBtn);
-        buttonRow.add(clearBtn);
+        buttonRow.add(saveBtn); buttonRow.add(loadBtn); buttonRow.add(clearBtn);
 
         JPanel buttons = new JPanel(new BorderLayout());
         buttons.add(buttonRow, BorderLayout.CENTER);
         buttons.add(statusLabel, BorderLayout.SOUTH);
 
-        // --- Popup Menus ---
-        installMessagePopup();
-        installMessageHeaderPopup();
-        installUserPopup();
-        installUserHeaderPopup();
-
         // --- Layout ---
         JScrollPane userScroll = new JScrollPane(userTable);
-        JScrollPane messageScroll = new JScrollPane(messageTable);
-
-        JSplitPane topSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, userScroll, messageScroll);
-        topSplit.setResizeWeight(0.35);
+        JSplitPane topSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, userScroll, messageScrollPane);
+        topSplit.setResizeWeight(0.3);
 
         JPanel bottomPanel = new JPanel(new BorderLayout());
         bottomPanel.add(viewerTabs, BorderLayout.CENTER);
@@ -136,14 +118,217 @@ public class AuthMatrixTab extends JPanel {
 
         origUserStringRenderer = userTable.getDefaultRenderer(String.class);
         origUserBooleanRenderer = userTable.getDefaultRenderer(Boolean.class);
-        applyRenderers();
+        applyUserRenderers();
+        rebuildSectionPanels();
     }
 
-    // --- Renderers ---
+    // ========== Section Panel Management ==========
 
-    private void applyRenderers() {
-        messageTable.setDefaultRenderer(Boolean.class, new Renderers.ResultCheckboxRenderer(db));
-        messageTable.setDefaultRenderer(String.class, new Renderers.RegexCellRenderer(db));
+    private void rebuildSectionPanels() {
+        sectionsBox.removeAll();
+        sectionPanels.clear();
+        sharedColumnModel = null;
+        activeMessageTable = null;
+
+        // Root section (messages before any SectionEntry)
+        addSectionPanel(null);
+        // Named sections
+        for (SectionEntry section : db.getSections()) {
+            addSectionPanel(section);
+        }
+
+        // Sticky column header from the first table
+        if (!sectionPanels.isEmpty()) {
+            JTable firstTable = sectionPanels.get(0).table;
+            JTableHeader header = firstTable.getTableHeader();
+            installMessageHeaderPopup(header, firstTable);
+            messageScrollPane.setColumnHeaderView(header);
+        }
+
+        sectionsBox.revalidate();
+        sectionsBox.repaint();
+    }
+
+    private void addSectionPanel(SectionEntry section) {
+        SectionPanel panel = new SectionPanel(section);
+        sectionPanels.add(panel);
+
+        // Share column model across all tables
+        if (sharedColumnModel == null) {
+            sharedColumnModel = panel.table.getColumnModel();
+            applyColumnWidths(sharedColumnModel);
+        } else {
+            panel.table.setColumnModel(sharedColumnModel);
+        }
+        // Hide individual table headers (sticky header from first table is used)
+        if (sectionPanels.size() > 1) {
+            panel.table.setTableHeader(null);
+        }
+
+        sectionsBox.add(panel);
+    }
+
+    private void applyColumnWidths(TableColumnModel colModel) {
+        if (colModel.getColumnCount() > 0) {
+            colModel.getColumn(0).setMinWidth(30);
+            colModel.getColumn(0).setMaxWidth(45);
+            colModel.getColumn(1).setMinWidth(300);
+            colModel.getColumn(2).setMinWidth(150);
+        }
+        if (colModel.getColumnCount() > 2) {
+            JComboBox<String> regexCombo = new JComboBox<>(db.getKnownRegexes().toArray(new String[0]));
+            regexCombo.setEditable(true);
+            colModel.getColumn(2).setCellEditor(new DefaultCellEditor(regexCombo));
+        }
+    }
+
+    private void refreshSectionData() {
+        for (SectionPanel panel : sectionPanels) {
+            List<MessageEntry> msgs = panel.section == null
+                    ? db.getRootMessages() : db.getMessagesInSection(panel.section);
+            panel.model.setMessages(msgs);
+            panel.resizeToFit();
+        }
+        sectionsBox.revalidate();
+        sectionsBox.repaint();
+    }
+
+    // ========== Section Panel Inner Class ==========
+
+    private class SectionPanel extends JPanel {
+        final SectionEntry section; // null = root
+        final SectionMessageTableModel model;
+        final JTable table;
+        private boolean collapsed = false;
+        private JLabel headerLabel;
+        private static final int HEADER_HEIGHT = 24;
+        private static final int EMPTY_ROW_HEIGHT = 22; // min height when empty (drop target)
+
+        SectionPanel(SectionEntry section) {
+            super(new BorderLayout());
+            this.section = section;
+            this.model = new SectionMessageTableModel(db);
+
+            List<MessageEntry> msgs = section == null ? db.getRootMessages() : db.getMessagesInSection(section);
+            model.setMessages(msgs);
+
+            // Table — override editCellAt to only toggle checkboxes when clicking the checkbox area
+            table = new JTable(model) {
+                @Override
+                public boolean editCellAt(int row, int col, java.util.EventObject e) {
+                    if (getColumnClass(col) == Boolean.class && e instanceof MouseEvent me) {
+                        // Only toggle if click is within the checkbox bounds (center 20px)
+                        Rectangle cellRect = getCellRect(row, col, false);
+                        int checkboxSize = 20;
+                        int centerX = cellRect.x + cellRect.width / 2;
+                        if (Math.abs(me.getX() - centerX) > checkboxSize / 2) return false;
+                    }
+                    return super.editCellAt(row, col, e);
+                }
+            };
+            table.setDragEnabled(true);
+            table.setDropMode(DropMode.INSERT_ROWS);
+            RowTransferHandler handler = new RowTransferHandler(table, db, true, section);
+            handler.setOnDropComplete(AuthMatrixTab.this::refreshSectionData);
+            table.setTransferHandler(handler);
+            table.getTableHeader().setReorderingAllowed(false);
+            table.setFillsViewportHeight(false);
+            table.setDefaultRenderer(Boolean.class, new Renderers.ResultCheckboxRenderer());
+            table.setDefaultRenderer(String.class, new Renderers.RegexCellRenderer());
+
+            // Selection sync
+            table.getSelectionModel().addListSelectionListener(e -> {
+                if (!e.getValueIsAdjusting() && table.getSelectedRow() >= 0) {
+                    for (SectionPanel other : sectionPanels) {
+                        if (other.table != table) other.table.clearSelection();
+                    }
+                    activeMessageTable = table;
+                    onMessageSelected(table, table.getSelectedRow());
+                }
+            });
+
+            table.setComponentPopupMenu(createMessagePopup());
+
+            // Section colored border around the table
+            if (section != null) {
+                table.setBorder(BorderFactory.createMatteBorder(0, 3, 1, 1, section.getColor()));
+
+                // Header label with collapse toggle
+                headerLabel = new JLabel(getHeaderText());
+                headerLabel.setOpaque(true);
+                headerLabel.setBackground(section.getColor());
+                headerLabel.setForeground(Color.WHITE);
+                headerLabel.setFont(headerLabel.getFont().deriveFont(Font.BOLD, 13f));
+                headerLabel.setPreferredSize(new Dimension(0, HEADER_HEIGHT));
+                headerLabel.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 4));
+                headerLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+                // Click to collapse/expand
+                headerLabel.addMouseListener(new MouseAdapter() {
+                    @Override public void mouseClicked(MouseEvent e) {
+                        if (SwingUtilities.isLeftMouseButton(e)) toggleCollapse();
+                    }
+                });
+
+                // Header right-click
+                JPopupMenu headerPopup = new JPopupMenu();
+                addItem(headerPopup, "Run section", ev -> {
+                    List<MessageEntry> sectionMsgs = db.getMessagesInSection(section);
+                    if (!sectionMsgs.isEmpty())
+                        new Thread(() -> engine.run(sectionMsgs, AuthMatrixTab.this::setRunning,
+                                AuthMatrixTab.this::setProgress, AuthMatrixTab.this::redrawAll)).start();
+                });
+                addItem(headerPopup, "Rename section", ev -> {
+                    String name = JOptionPane.showInputDialog(AuthMatrixTab.this, "Section Name:", section.getName());
+                    if (name != null && !name.trim().isEmpty()) {
+                        section.setName(name.trim());
+                        headerLabel.setText(getHeaderText());
+                    }
+                });
+                addItem(headerPopup, "Delete section", ev -> { db.deleteSection(section); redrawAll(); });
+                headerLabel.setComponentPopupMenu(headerPopup);
+
+                add(headerLabel, BorderLayout.NORTH);
+            }
+
+            add(table, BorderLayout.CENTER);
+            resizeToFit();
+        }
+
+        private String getHeaderText() {
+            return "  " + (collapsed ? "\u25B6 " : "\u25BC ") + section.getName();
+        }
+
+        private void toggleCollapse() {
+            collapsed = !collapsed;
+            table.setVisible(!collapsed);
+            if (headerLabel != null) headerLabel.setText(getHeaderText());
+            resizeToFit();
+            sectionsBox.revalidate();
+            sectionsBox.repaint();
+        }
+
+        void resizeToFit() {
+            if (collapsed) {
+                int h = section != null ? HEADER_HEIGHT : 0;
+                setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
+                setPreferredSize(new Dimension(0, h));
+            } else {
+                int rows = model.getRowCount();
+                int tableHeight = rows > 0 ? rows * table.getRowHeight() : EMPTY_ROW_HEIGHT;
+                table.setPreferredScrollableViewportSize(new Dimension(0, tableHeight));
+                table.setPreferredSize(new Dimension(0, tableHeight));
+                int totalHeight = tableHeight + (section != null ? HEADER_HEIGHT : 0);
+                setMaximumSize(new Dimension(Integer.MAX_VALUE, totalHeight));
+                setPreferredSize(new Dimension(0, totalHeight));
+            }
+            revalidate();
+        }
+    }
+
+    // ========== Renderers ==========
+
+    private void applyUserRenderers() {
         userTable.setDefaultRenderer(String.class, new Renderers.UserCellRenderer(origUserStringRenderer, db));
         userTable.setDefaultRenderer(Boolean.class, new Renderers.UserCellRenderer(origUserBooleanRenderer, db));
     }
@@ -152,32 +337,12 @@ public class AuthMatrixTab extends JPanel {
         Runnable doRedraw = () -> {
             saveEditorChanges();
             userModel.fireTableStructureChanged();
-            messageModel.fireTableStructureChanged();
-            applyRenderers();
-            applyMessageColumnWidths();
+            applyUserRenderers();
             applyUserColumnWidths();
-            messageTable.repaint();
-            userTable.repaint();
+            rebuildSectionPanels();
         };
-        if (SwingUtilities.isEventDispatchThread()) {
-            doRedraw.run();
-        } else {
-            SwingUtilities.invokeLater(doRedraw);
-        }
-    }
-
-    private void applyMessageColumnWidths() {
-        if (messageTable.getColumnCount() > 0) {
-            messageTable.getColumnModel().getColumn(0).setMinWidth(30);
-            messageTable.getColumnModel().getColumn(0).setMaxWidth(45);
-            messageTable.getColumnModel().getColumn(1).setMinWidth(300);
-            messageTable.getColumnModel().getColumn(2).setMinWidth(150);
-        }
-        if (messageTable.getColumnCount() > 2) {
-            JComboBox<String> regexCombo = new JComboBox<>(db.getKnownRegexes().toArray(new String[0]));
-            regexCombo.setEditable(true);
-            messageTable.getColumnModel().getColumn(2).setCellEditor(new DefaultCellEditor(regexCombo));
-        }
+        if (SwingUtilities.isEventDispatchThread()) doRedraw.run();
+        else SwingUtilities.invokeLater(doRedraw);
     }
 
     private void applyUserColumnWidths() {
@@ -189,16 +354,18 @@ public class AuthMatrixTab extends JPanel {
         }
     }
 
-    // --- Message Selection ---
+    // ========== Message Selection ==========
 
-    private void onMessageSelected(int row) {
+    private void onMessageSelected(JTable table, int row) {
         saveEditorChanges();
         viewerTabs.removeAll();
         editableEditors.clear();
         if (db.getLock().isLocked()) return;
-        if (row < 0 || row >= db.getMessages().size()) return;
 
-        MessageEntry msg = db.getMessages().get(row);
+        SectionMessageTableModel model = (SectionMessageTableModel) table.getModel();
+        MessageEntry msg = model.getMessageAt(row);
+        if (msg == null) return;
+
         JTabbedPane originalTab = createViewerTab(msg, true);
         originalTab.setSelectedIndex(0);
         viewerTabs.addTab("Original", originalTab);
@@ -246,9 +413,7 @@ public class AuthMatrixTab extends JPanel {
     private void saveEditorChanges() {
         for (var entry : editableEditors.entrySet()) {
             HttpRequestEditor editor = entry.getValue();
-            if (editor.isModified()) {
-                entry.getKey().setRequest(editor.getRequest().toByteArray().getBytes());
-            }
+            if (editor.isModified()) entry.getKey().setRequest(editor.getRequest().toByteArray().getBytes());
         }
         editableEditors.clear();
     }
@@ -259,13 +424,13 @@ public class AuthMatrixTab extends JPanel {
                 ByteArray.byteArray(msg.getRequest()));
     }
 
-    // --- Popup Menus ---
+    // ========== Popup Menus ==========
 
-    private void installMessagePopup() {
+    private JPopupMenu createMessagePopup() {
         JPopupMenu popup = new JPopupMenu();
         addItem(popup, "Disable/Enable Request(s)", e -> {
             for (MessageEntry msg : getSelectedMessages()) msg.toggleEnabled();
-            redrawAll();
+            refreshSectionData();
         });
         addItem(popup, "Run Request(s)", e -> {
             List<MessageEntry> selected = getSelectedMessages();
@@ -274,7 +439,7 @@ public class AuthMatrixTab extends JPanel {
         });
         addItem(popup, "Toggle Regex Mode (Success/Failure)", e -> {
             for (MessageEntry msg : getSelectedMessages()) { msg.toggleFailureRegexMode(); msg.clearResults(); }
-            redrawAll();
+            refreshSectionData();
         });
         addItem(popup, "Change Regexes", e -> onChangeRegexes());
         addItem(popup, "Change Target Domain", e -> onChangeDomain());
@@ -283,7 +448,8 @@ public class AuthMatrixTab extends JPanel {
             redrawAll();
         });
         popup.addSeparator();
-        // Dynamic items: "Run for [role]" on single cell, bulk toggle on multi-select
+
+        // Dynamic items
         popup.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
             private final List<Component> dynamicItems = new ArrayList<>();
             @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
@@ -291,60 +457,190 @@ public class AuthMatrixTab extends JPanel {
                 dynamicItems.clear();
                 List<MessageEntry> selected = getSelectedMessages();
 
-                // "Run for [role]" — only when a single role cell is right-clicked
-                Point mouse = messageTable.getMousePosition();
-                if (mouse != null && selected.size() == 1) {
-                    int col = messageTable.columnAtPoint(mouse);
-                    RoleEntry clickedRole = messageModel.getRoleForColumn(col);
-                    if (clickedRole != null) {
-                        MessageEntry msg = selected.get(0);
-                        JMenuItem runForRole = new JMenuItem("Run for role: " + clickedRole.getName());
-                        runForRole.addActionListener(ev -> new Thread(() ->
-                            engine.runForRole(msg, clickedRole, AuthMatrixTab.this::setRunning,
-                                    AuthMatrixTab.this::setProgress, AuthMatrixTab.this::redrawAll)).start());
-                        dynamicItems.add(runForRole);
-                        popup.add(runForRole);
+                // "Run for [role]" — single role cell
+                if (activeMessageTable != null && selected.size() == 1) {
+                    Point mouse = activeMessageTable.getMousePosition();
+                    if (mouse != null) {
+                        int col = activeMessageTable.columnAtPoint(mouse);
+                        SectionMessageTableModel model = (SectionMessageTableModel) activeMessageTable.getModel();
+                        RoleEntry clickedRole = model.getRoleForColumn(col);
+                        if (clickedRole != null) {
+                            MessageEntry msg = selected.get(0);
+                            JMenuItem item = new JMenuItem("Run for: " + clickedRole.getName());
+                            item.addActionListener(ev -> new Thread(() ->
+                                engine.runForRole(msg, clickedRole, AuthMatrixTab.this::setRunning,
+                                        AuthMatrixTab.this::setProgress, AuthMatrixTab.this::redrawAll)).start());
+                            dynamicItems.add(item);
+                            popup.add(item);
+                        }
                     }
                 }
 
-                // Bulk toggle — only when multiple rows selected
+                // "Send to [section]" items + "Run section"
+                if (!selected.isEmpty()) {
+                    List<SectionEntry> sections = db.getSections();
+                    if (!sections.isEmpty()) {
+                        JSeparator sep = new JSeparator();
+                        dynamicItems.add(sep); popup.add(sep);
+                        for (SectionEntry section : sections) {
+                            JMenuItem item = new JMenuItem("Send to section: " + section.getName());
+                            item.setForeground(section.getColor());
+                            item.addActionListener(ev -> {
+                                moveMessagesToSection(selected, section);
+                                refreshSectionData();
+                            });
+                            dynamicItems.add(item); popup.add(item);
+                        }
+                        JMenuItem root = new JMenuItem("Send to root (no section)");
+                        root.addActionListener(ev -> {
+                            moveMessagesToRoot(selected);
+                            refreshSectionData();
+                        });
+                        dynamicItems.add(root); popup.add(root);
+                    }
+
+                    // "Run section" — determine which section the active table belongs to
+                    if (activeMessageTable != null) {
+                        for (SectionPanel panel : sectionPanels) {
+                            if (panel.table == activeMessageTable && panel.section != null) {
+                                SectionEntry sec = panel.section;
+                                JMenuItem runSec = new JMenuItem("Run section: " + sec.getName());
+                                runSec.addActionListener(ev -> {
+                                    List<MessageEntry> sectionMsgs = db.getMessagesInSection(sec);
+                                    if (!sectionMsgs.isEmpty())
+                                        new Thread(() -> engine.run(sectionMsgs, AuthMatrixTab.this::setRunning,
+                                                AuthMatrixTab.this::setProgress, AuthMatrixTab.this::redrawAll)).start();
+                                });
+                                dynamicItems.add(runSec); popup.add(runSec);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Bulk toggle — multiple rows
                 if (selected.size() >= 2) {
                     JSeparator sep = new JSeparator();
-                    dynamicItems.add(sep);
-                    popup.add(sep);
+                    dynamicItems.add(sep); popup.add(sep);
                     for (RoleEntry role : db.getAllRoles()) {
-                        boolean allChecked = selected.stream().allMatch(m -> m.isRoleAuthorized(role));
-                        boolean newValue = !allChecked;
-                        String label = (newValue ? "Check" : "Uncheck") + " all for: " + role.getName();
-                        JMenuItem item = new JMenuItem(label);
+                        boolean allUnchecked = selected.stream().noneMatch(m -> m.isRoleAuthorized(role));
+                        // Mixed or all checked → uncheck. All unchecked → check.
+                        boolean newValue = allUnchecked;
+                        JMenuItem item = new JMenuItem((newValue ? "Check" : "Uncheck") + " all for: " + role.getName());
                         item.addActionListener(ev -> {
-                            for (MessageEntry msg : selected) msg.setRoleAuthorized(role, newValue);
-                            redrawAll();
+                            for (MessageEntry msg : selected) {
+                                msg.setRoleAuthorized(role, newValue);
+                                if (!msg.getUserRuns().isEmpty()) {
+                                    java.util.Set<RoleEntry> prev = new java.util.HashSet<>(msg.getRoleResults().keySet());
+                                    RunEngine.evaluateRoleResults(db, msg);
+                                    msg.getRoleResults().keySet().retainAll(prev);
+                                }
+                            }
+                            refreshSectionData();
                         });
-                        dynamicItems.add(item);
-                        popup.add(item);
+                        dynamicItems.add(item); popup.add(item);
                     }
                 }
             }
             @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {}
             @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {}
         });
-        messageTable.setComponentPopupMenu(popup);
+        return popup;
     }
 
-    private void installMessageHeaderPopup() {
+    // ========== Role Header Actions (shared between message + user table headers) ==========
+
+    private RoleEntry clickedHeaderRole; // set by header mouse listener before popup shows
+
+    private void promptRenameRole() {
+        if (clickedHeaderRole == null) return;
+        String name = JOptionPane.showInputDialog(this, "New Role Name:", clickedHeaderRole.getName());
+        if (name != null && !name.trim().isEmpty()) { clickedHeaderRole.setName(name.trim()); redrawAll(); }
+    }
+
+    private void deleteClickedRole() {
+        if (clickedHeaderRole != null) { db.deleteRole(clickedHeaderRole); redrawAll(); }
+    }
+
+    private void bulkSetRole(RoleEntry role, boolean value) {
+        if (role == null) return;
+        List<MessageEntry> msgs = getSelectedMessages();
+        if (msgs.isEmpty()) msgs = db.getMessages();
+        for (MessageEntry msg : msgs) {
+            msg.setRoleAuthorized(role, value);
+            if (!msg.getUserRuns().isEmpty()) {
+                java.util.Set<RoleEntry> prev = new java.util.HashSet<>(msg.getRoleResults().keySet());
+                RunEngine.evaluateRoleResults(db, msg);
+                msg.getRoleResults().keySet().retainAll(prev);
+            }
+        }
+        refreshSectionData();
+    }
+
+    /** Install a role-only right-click popup on any table header. extraItems adds table-specific items. */
+    private void installRoleHeaderPopup(JTableHeader header, int staticColCount, java.util.function.Consumer<JPopupMenu> extraItems) {
         JPopupMenu popup = new JPopupMenu();
-        addItem(popup, "Remove Role", e -> {
-            int col = messageTable.columnAtPoint(messageTable.getMousePosition());
-            RoleEntry role = messageModel.getRoleForColumn(col);
-            if (role != null) { db.deleteRole(role); redrawAll(); }
+        addItem(popup, "Rename Role", e -> promptRenameRole());
+        addItem(popup, "Delete Role", e -> deleteClickedRole());
+        if (extraItems != null) extraItems.accept(popup);
+
+        header.addMouseListener(new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e) { maybeShowPopup(e); }
+            @Override public void mouseReleased(MouseEvent e) { maybeShowPopup(e); }
+            private void maybeShowPopup(MouseEvent e) {
+                if (!e.isPopupTrigger()) return;
+                int col = header.columnAtPoint(e.getPoint());
+                if (col < staticColCount) return;
+                int roleIdx = col - staticColCount;
+                // For user table, account for header columns
+                List<RoleEntry> roles;
+                if (staticColCount == MessageTableModel.STATIC_COLS) {
+                    roles = db.getAllRoles();
+                } else {
+                    // User table: roles start after static cols + header count
+                    roles = db.getRegularRoles();
+                    roleIdx = col - (2 + db.getHeaderCount()); // UserTableModel.STATIC_COLS=2 + headers
+                }
+                if (roleIdx < 0 || roleIdx >= roles.size()) return;
+                clickedHeaderRole = roles.get(roleIdx);
+                popup.show(header, e.getX(), e.getY());
+            }
         });
-        addItem(popup, "Bulk Select Checkboxes", e -> bulkSetRole(true));
-        addItem(popup, "Bulk Unselect Checkboxes", e -> bulkSetRole(false));
-        messageTable.getTableHeader().setComponentPopupMenu(popup);
     }
 
-    private void installUserPopup() {
+    private void installMessageHeaderPopup(JTableHeader header, JTable headerTable) {
+        installRoleHeaderPopup(header, MessageTableModel.STATIC_COLS, popup -> {
+            popup.addSeparator();
+            addItem(popup, "Bulk Select Checkboxes", e -> bulkSetRole(clickedHeaderRole, true));
+            addItem(popup, "Bulk Unselect Checkboxes", e -> bulkSetRole(clickedHeaderRole, false));
+        });
+    }
+
+    // ========== Section Move Helpers ==========
+
+    private void moveMessagesToSection(List<MessageEntry> msgs, SectionEntry section) {
+        List<Object> rows = db.getRows();
+        rows.removeAll(msgs);
+        int sectionIdx = rows.indexOf(section);
+        if (sectionIdx < 0) return;
+        int insertAt = sectionIdx + 1;
+        while (insertAt < rows.size() && rows.get(insertAt) instanceof MessageEntry) insertAt++;
+        rows.addAll(insertAt, msgs);
+    }
+
+    private void moveMessagesToRoot(List<MessageEntry> msgs) {
+        List<Object> rows = db.getRows();
+        rows.removeAll(msgs);
+        int firstSection = rows.size();
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i) instanceof SectionEntry) { firstSection = i; break; }
+        }
+        rows.addAll(firstSection, msgs);
+    }
+
+    // ========== User Table Popups ==========
+
+    private void installUserPopups() {
         JPopupMenu popup = new JPopupMenu();
         addItem(popup, "Disable/Enable User(s)", e -> {
             for (int row : userTable.getSelectedRows()) db.getUsers().get(row).toggleEnabled();
@@ -357,34 +653,14 @@ public class AuthMatrixTab extends JPanel {
             redrawAll();
         });
         userTable.setComponentPopupMenu(popup);
+
+        installRoleHeaderPopup(userTable.getTableHeader(), 2 + db.getHeaderCount(), null);
     }
 
-    private void installUserHeaderPopup() {
-        JPopupMenu popup = new JPopupMenu();
-        addItem(popup, "Remove", e -> {
-            int col = userTable.columnAtPoint(userTable.getMousePosition());
-            if (userModel.isRoleColumn(col)) {
-                RoleEntry role = userModel.getRoleForColumn(col);
-                if (role != null) { db.deleteRole(role); redrawAll(); }
-            } else if (userModel.isHeaderColumn(col)) {
-                db.deleteHeader(col - 2);
-                redrawAll();
-            }
-        });
-        userTable.getTableHeader().setComponentPopupMenu(popup);
-    }
-
-    private void bulkSetRole(boolean value) {
-        int col = messageTable.columnAtPoint(messageTable.getMousePosition());
-        RoleEntry role = messageModel.getRoleForColumn(col);
-        if (role != null) { db.setRoleForAllSelectedMessages(getSelectedMessages(), role, value); redrawAll(); }
-    }
-
-    // --- Button Actions ---
+    // ========== Button Actions ==========
 
     private void onRun() {
-        saveEditorChanges();
-        viewerTabs.removeAll();
+        saveEditorChanges(); viewerTabs.removeAll();
         new Thread(() -> engine.run(null, this::setRunning, this::setProgress, this::redrawAll)).start();
     }
 
@@ -400,14 +676,13 @@ public class AuthMatrixTab extends JPanel {
         SwingUtilities.invokeLater(() -> {
             Container parent = this.getParent();
             while (parent != null && !(parent instanceof JTabbedPane)) parent = parent.getParent();
-            if (parent instanceof JTabbedPane tabbedPane) {
-                int index = tabbedPane.indexOfComponent(this);
-                if (index >= 0) {
-                    Color original = tabbedPane.getBackgroundAt(index);
-                    tabbedPane.setBackgroundAt(index, new Color(0xFF, 0x66, 0x33));
-                    javax.swing.Timer timer = new javax.swing.Timer(3000, e -> tabbedPane.setBackgroundAt(index, original));
-                    timer.setRepeats(false);
-                    timer.start();
+            if (parent instanceof JTabbedPane tp) {
+                int idx = tp.indexOfComponent(this);
+                if (idx >= 0) {
+                    Color orig = tp.getBackgroundAt(idx);
+                    tp.setBackgroundAt(idx, new Color(0xFF, 0x66, 0x33));
+                    javax.swing.Timer t = new javax.swing.Timer(3000, e -> tp.setBackgroundAt(idx, orig));
+                    t.setRepeats(false); t.start();
                 }
             }
         });
@@ -415,10 +690,15 @@ public class AuthMatrixTab extends JPanel {
 
     public void scrollToLastMessage() {
         SwingUtilities.invokeLater(() -> {
-            int lastRow = messageTable.getRowCount() - 1;
-            if (lastRow >= 0) {
-                messageTable.scrollRectToVisible(messageTable.getCellRect(lastRow, 0, true));
-                messageTable.setRowSelectionInterval(lastRow, lastRow);
+            if (!sectionPanels.isEmpty()) {
+                SectionPanel last = sectionPanels.get(sectionPanels.size() - 1);
+                int lastRow = last.table.getRowCount() - 1;
+                if (lastRow >= 0) {
+                    last.table.scrollRectToVisible(last.table.getCellRect(lastRow, 0, true));
+                    last.table.setRowSelectionInterval(lastRow, lastRow);
+                    activeMessageTable = last.table;
+                }
+                sectionsBox.scrollRectToVisible(last.getBounds());
             }
         });
     }
@@ -434,6 +714,11 @@ public class AuthMatrixTab extends JPanel {
     }
 
     private void onNewHeader() { db.addHeader(); redrawAll(); }
+
+    private void onNewSection() {
+        String name = JOptionPane.showInputDialog(this, "Enter Section Name:");
+        if (name != null && !name.trim().isEmpty()) { db.createSection(name.trim()); redrawAll(); }
+    }
 
     private void onSave() {
         saveEditorChanges();
@@ -473,15 +758,14 @@ public class AuthMatrixTab extends JPanel {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.add(new JLabel("Select a Regex for all selected Requests:"));
-        panel.add(regexCombo);
-        panel.add(failureMode);
+        panel.add(regexCombo); panel.add(failureMode);
         int result = JOptionPane.showConfirmDialog(this, panel, "Select Response Regex", JOptionPane.OK_CANCEL_OPTION);
         if (result != JOptionPane.OK_OPTION) return;
         String regex = (String) regexCombo.getSelectedItem();
         if (regex == null || regex.isEmpty()) return;
         for (MessageEntry msg : getSelectedMessages()) { msg.setRegex(regex); msg.setFailureRegexMode(failureMode.isSelected()); }
         db.addRegexIfNew(regex);
-        redrawAll();
+        refreshSectionData();
     }
 
     private void onChangeDomain() {
@@ -496,34 +780,33 @@ public class AuthMatrixTab extends JPanel {
             if (e.getStateChange() == ItemEvent.SELECTED && "80".equals(portField.getText())) portField.setText("443");
             else if (e.getStateChange() == ItemEvent.DESELECTED && "443".equals(portField.getText())) portField.setText("80");
         });
-        JPanel panel = new JPanel();
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.add(labeled("Host:", hostField));
-        panel.add(labeled("Port:", portField));
-        panel.add(tlsBox);
-        panel.add(replaceHostBox);
+        JPanel panel = new JPanel(); panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.add(labeled("Host:", hostField)); panel.add(labeled("Port:", portField));
+        panel.add(tlsBox); panel.add(replaceHostBox);
         int result = JOptionPane.showConfirmDialog(this, panel, "Configure target details", JOptionPane.OK_CANCEL_OPTION);
         if (result != JOptionPane.OK_OPTION) return;
         String host = hostField.getText().trim();
         if (host.isEmpty()) return;
-        int port;
-        try { port = Integer.parseInt(portField.getText().trim()); }
+        int port; try { port = Integer.parseInt(portField.getText().trim()); }
         catch (NumberFormatException ex) { port = tlsBox.isSelected() ? 443 : 80; }
         boolean secure = tlsBox.isSelected();
         for (MessageEntry msg : selected) {
             if (replaceHostBox.isSelected() && msg.getRequest() != null) msg.setRequest(RunEngine.replaceHostHeader(msg.getRequest(), host));
             msg.setHost(host); msg.setPort(port); msg.setSecure(secure); msg.clearResults();
         }
-        redrawAll();
+        refreshSectionData();
     }
 
-    // --- Helpers ---
+    // ========== Helpers ==========
 
     private List<MessageEntry> getSelectedMessages() {
-        int[] rows = messageTable.getSelectedRows();
+        if (activeMessageTable == null) return List.of();
+        int[] rows = activeMessageTable.getSelectedRows();
+        SectionMessageTableModel model = (SectionMessageTableModel) activeMessageTable.getModel();
         List<MessageEntry> result = new ArrayList<>();
         for (int row : rows) {
-            if (row >= 0 && row < db.getMessages().size()) result.add(db.getMessages().get(row));
+            MessageEntry msg = model.getMessageAt(row);
+            if (msg != null) result.add(msg);
         }
         return result;
     }
@@ -544,5 +827,10 @@ public class AuthMatrixTab extends JPanel {
         JMenuItem item = new JMenuItem(label);
         item.addActionListener(action);
         menu.add(item);
+    }
+
+    {
+        // Deferred user popup install (needs userTable to be initialized)
+        SwingUtilities.invokeLater(this::installUserPopups);
     }
 }
