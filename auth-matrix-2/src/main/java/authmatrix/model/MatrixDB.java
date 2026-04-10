@@ -247,6 +247,22 @@ public class MatrixDB {
         return result;
     }
 
+    /** Check if any message already covers this URL path. */
+    public boolean hasPath(String path) {
+        if (path == null) return false;
+        for (MessageEntry msg : getMessages()) {
+            if (msg.getRequest() == null) continue;
+            // Extract path from stored request name (format: "METHOD  /path")
+            String name = msg.getName();
+            int space = name.indexOf('/');
+            if (space >= 0) {
+                String existingPath = name.substring(space);
+                if (existingPath.equals(path)) return true;
+            }
+        }
+        return false;
+    }
+
     // --- Row operations (unified for messages + sections) ---
 
     public void moveRow(int fromIndex, int toIndex) {

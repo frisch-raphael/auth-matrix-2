@@ -10,6 +10,12 @@ import burp.api.montoya.http.message.HttpHeader;
 import burp.api.montoya.core.ByteArray;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
+import burp.api.montoya.proxy.http.ProxyResponseHandler;
+import burp.api.montoya.proxy.http.ProxyResponseReceivedAction;
+import burp.api.montoya.proxy.http.ProxyResponseToBeSentAction;
+import burp.api.montoya.proxy.http.InterceptedResponse;
+import burp.api.montoya.core.Annotations;
+import burp.api.montoya.core.HighlightColor;
 
 import javax.swing.*;
 import java.awt.*;
@@ -35,6 +41,26 @@ public class Extension implements BurpExtension {
 
         KeyboardShortcutHandler shortcutHandler = new KeyboardShortcutHandler(contextMenu);
         KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(shortcutHandler);
+
+        // Highlight proxy requests whose path is not in AuthMatrix
+        api.proxy().registerResponseHandler(new ProxyResponseHandler() {
+            @Override
+            public ProxyResponseReceivedAction handleResponseReceived(InterceptedResponse response) {
+                return ProxyResponseReceivedAction.continueWith(response);
+            }
+
+            @Override
+            public ProxyResponseToBeSentAction handleResponseToBeSent(InterceptedResponse response) {
+                if (tab.isHighlightNewPathsEnabled()) {
+                    String path = response.initiatingRequest().path();
+                    if (path != null && !db.hasPath(path)) {
+                        return ProxyResponseToBeSentAction.continueWith(
+                                response, Annotations.annotations().withHighlightColor(HighlightColor.ORANGE));
+                    }
+                }
+                return ProxyResponseToBeSentAction.continueWith(response);
+            }
+        });
 
         api.extension().registerUnloadingHandler(() ->
                 KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(shortcutHandler));

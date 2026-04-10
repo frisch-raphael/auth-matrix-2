@@ -40,8 +40,11 @@ public class AuthMatrixTab extends JPanel {
     private TableColumnModel sharedColumnModel;
 
     private final Map<MessageEntry, HttpRequestEditor> editableEditors = new HashMap<>();
+    private final JToggleButton highlightNewPathsToggle;
     private TableCellRenderer origUserStringRenderer;
     private TableCellRenderer origUserBooleanRenderer;
+
+    public boolean isHighlightNewPathsEnabled() { return highlightNewPathsToggle.isSelected(); }
 
     public AuthMatrixTab(MontoyaApi api, MatrixDB db) {
         super(new BorderLayout());
@@ -97,6 +100,12 @@ public class AuthMatrixTab extends JPanel {
         buttonRow.add(newHeaderBtn); buttonRow.add(newSectionBtn);
         buttonRow.add(createSeparator());
         buttonRow.add(saveBtn); buttonRow.add(loadBtn); buttonRow.add(clearBtn);
+        buttonRow.add(createSeparator());
+        highlightNewPathsToggle = new JToggleButton("Highlight New Paths");
+        highlightNewPathsToggle.setToolTipText(
+                "When enabled, proxy requests whose path is not already in AuthMatrix " +
+                "are highlighted orange in Proxy History. Helps spot untested endpoints.");
+        buttonRow.add(highlightNewPathsToggle);
 
         JPanel buttons = new JPanel(new BorderLayout());
         buttons.add(buttonRow, BorderLayout.CENTER);
