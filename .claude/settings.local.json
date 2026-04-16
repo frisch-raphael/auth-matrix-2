@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew build:*)",
+      "Bash(jar tf:*)",
+      "Bash(unzip -l \"/c/Users/Rapha/.gradle/caches/modules-2/files-2.1/net.portswigger.burp.extensions/montoya-api/2025.12/c3d0c8eab598066020c7f49e4a19e199561cc178/montoya-api-2025.12.jar\")"
+    ]
+  }
+}

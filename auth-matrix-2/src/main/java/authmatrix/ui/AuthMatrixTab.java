@@ -1,6 +1,7 @@
 package authmatrix.ui;
 
 import authmatrix.model.*;
+import authmatrix.HtmlExporter;
 import authmatrix.RunEngine;
 import authmatrix.StateManager;
 import burp.api.montoya.MontoyaApi;
@@ -77,6 +78,7 @@ public class AuthMatrixTab extends JPanel {
         JButton newSectionBtn = new JButton("New Section");
         JButton saveBtn = new JButton("Save");
         JButton loadBtn = new JButton("Load");
+        JButton exportBtn = new JButton("Export HTML");
         JButton clearBtn = new JButton("Clear");
 
         statusLabel = new JLabel(" ");
@@ -91,6 +93,7 @@ public class AuthMatrixTab extends JPanel {
         newSectionBtn.addActionListener(e -> onNewSection());
         saveBtn.addActionListener(e -> onSave());
         loadBtn.addActionListener(e -> onLoad());
+        exportBtn.addActionListener(e -> onExportHtml());
         clearBtn.addActionListener(e -> onClear());
 
         JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -99,7 +102,7 @@ public class AuthMatrixTab extends JPanel {
         buttonRow.add(newUserBtn); buttonRow.add(newRoleBtn);
         buttonRow.add(newHeaderBtn); buttonRow.add(newSectionBtn);
         buttonRow.add(createSeparator());
-        buttonRow.add(saveBtn); buttonRow.add(loadBtn); buttonRow.add(clearBtn);
+        buttonRow.add(saveBtn); buttonRow.add(loadBtn); buttonRow.add(exportBtn); buttonRow.add(clearBtn);
         buttonRow.add(createSeparator());
         highlightNewPathsToggle = new JToggleButton("Highlight New Paths");
         highlightNewPathsToggle.setToolTipText(
@@ -531,23 +534,37 @@ public class AuthMatrixTab extends JPanel {
                 if (selected.size() >= 2) {
                     JSeparator sep = new JSeparator();
                     dynamicItems.add(sep); popup.add(sep);
+
+                    // Check all / Uncheck all (all roles at once) — always show both
+                    JMenuItem checkAll = new JMenuItem("Check all roles");
+                    checkAll.addActionListener(ev -> {
+                        for (RoleEntry r : db.getAllRoles()) bulkSetAuthorized(selected, r, true);
+                        refreshSectionData();
+                    });
+                    dynamicItems.add(checkAll); popup.add(checkAll);
+
+                    JMenuItem uncheckAll = new JMenuItem("Uncheck all roles");
+                    uncheckAll.addActionListener(ev -> {
+                        for (RoleEntry r : db.getAllRoles()) bulkSetAuthorized(selected, r, false);
+                        refreshSectionData();
+                    });
+                    dynamicItems.add(uncheckAll); popup.add(uncheckAll);
+
+                    // Per-role: always show both check and uncheck
                     for (RoleEntry role : db.getAllRoles()) {
+                        boolean allChecked = selected.stream().allMatch(m -> m.isRoleAuthorized(role));
                         boolean allUnchecked = selected.stream().noneMatch(m -> m.isRoleAuthorized(role));
-                        // Mixed or all checked → uncheck. All unchecked → check.
-                        boolean newValue = allUnchecked;
-                        JMenuItem item = new JMenuItem((newValue ? "Check" : "Uncheck") + " all for: " + role.getName());
-                        item.addActionListener(ev -> {
-                            for (MessageEntry msg : selected) {
-                                msg.setRoleAuthorized(role, newValue);
-                                if (!msg.getUserRuns().isEmpty()) {
-                                    java.util.Set<RoleEntry> prev = new java.util.HashSet<>(msg.getRoleResults().keySet());
-                                    RunEngine.evaluateRoleResults(db, msg);
-                                    msg.getRoleResults().keySet().retainAll(prev);
-                                }
-                            }
-                            refreshSectionData();
-                        });
-                        dynamicItems.add(item); popup.add(item);
+
+                        if (!allChecked) {
+                            JMenuItem item = new JMenuItem("Check all for: " + role.getName());
+                            item.addActionListener(ev -> { bulkSetAuthorized(selected, role, true); refreshSectionData(); });
+                            dynamicItems.add(item); popup.add(item);
+                        }
+                        if (!allUnchecked) {
+                            JMenuItem item = new JMenuItem("Uncheck all for: " + role.getName());
+                            item.addActionListener(ev -> { bulkSetAuthorized(selected, role, false); refreshSectionData(); });
+                            dynamicItems.add(item); popup.add(item);
+                        }
                     }
                 }
             }
@@ -571,10 +588,8 @@ public class AuthMatrixTab extends JPanel {
         if (clickedHeaderRole != null) { db.deleteRole(clickedHeaderRole); redrawAll(); }
     }
 
-    private void bulkSetRole(RoleEntry role, boolean value) {
-        if (role == null) return;
-        List<MessageEntry> msgs = getSelectedMessages();
-        if (msgs.isEmpty()) msgs = db.getMessages();
+    /** Set a role's authorization on multiple messages and re-evaluate colors. */
+    private void bulkSetAuthorized(List<MessageEntry> msgs, RoleEntry role, boolean value) {
         for (MessageEntry msg : msgs) {
             msg.setRoleAuthorized(role, value);
             if (!msg.getUserRuns().isEmpty()) {
@@ -583,6 +598,13 @@ public class AuthMatrixTab extends JPanel {
                 msg.getRoleResults().keySet().retainAll(prev);
             }
         }
+    }
+
+    private void bulkSetRole(RoleEntry role, boolean value) {
+        if (role == null) return;
+        List<MessageEntry> msgs = getSelectedMessages();
+        if (msgs.isEmpty()) msgs = db.getMessages();
+        bulkSetAuthorized(msgs, role, value);
         refreshSectionData();
     }
 
@@ -742,6 +764,30 @@ public class AuthMatrixTab extends JPanel {
         catch (IOException ex) {
             api.logging().logToError("Save failed: " + ex.getMessage());
             JOptionPane.showMessageDialog(this, "Save failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void onExportHtml() {
+        saveEditorChanges();
+        JFileChooser chooser = new JFileChooser(fileChooser.getCurrentDirectory());
+        String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmm").format(new java.util.Date());
+        chooser.setSelectedFile(new File("authmatrix-report-" + stamp + ".html"));
+        int result = chooser.showSaveDialog(this);
+        if (result != JFileChooser.APPROVE_OPTION) return;
+        File file = chooser.getSelectedFile();
+        if (!file.getName().toLowerCase().endsWith(".html") && !file.getName().toLowerCase().endsWith(".htm")) {
+            file = new File(file.getParentFile(), file.getName() + ".html");
+        }
+        if (file.exists()) {
+            int confirm = JOptionPane.showConfirmDialog(this, "The file exists, overwrite?", "Existing File", JOptionPane.YES_NO_OPTION);
+            if (confirm != JOptionPane.YES_OPTION) return;
+        }
+        try {
+            HtmlExporter.export(db, file);
+            statusLabel.setText("Exported HTML: " + file.getName());
+        } catch (IOException ex) {
+            api.logging().logToError("HTML export failed: " + ex.getMessage());
+            JOptionPane.showMessageDialog(this, "Export failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
         }
     }
 

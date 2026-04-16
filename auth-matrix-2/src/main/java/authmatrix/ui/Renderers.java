@@ -20,6 +20,12 @@ public final class Renderers {
     private static final Color DISABLED_SEL    = new Color(0xD1, 0xB5, 0xA3);
     private static final Color FAILURE_REGEX   = new Color(0x99, 0x99, 0xCC);
 
+    /** Pick a readable foreground for a given background. */
+    private static Color contrastForeground(Color bg) {
+        double luminance = 0.299 * bg.getRed() + 0.587 * bg.getGreen() + 0.114 * bg.getBlue();
+        return luminance > 140 ? Color.BLACK : Color.WHITE;
+    }
+
     public static class ResultCheckboxRenderer extends JCheckBox implements TableCellRenderer {
 
         public ResultCheckboxRenderer() {
@@ -40,6 +46,7 @@ public final class Renderers {
 
             if (!msg.isEnabled()) {
                 setBackground(isSelected ? DISABLED_SEL : DISABLED);
+                setForeground(contrastForeground(getBackground()));
                 return this;
             }
 
@@ -50,6 +57,7 @@ public final class Renderers {
                 if (passed) setBackground(isSelected ? GREEN_SELECTED : GREEN);
                 else if (authorized) setBackground(isSelected ? BLUE_SELECTED : BLUE);
                 else setBackground(isSelected ? RED_SELECTED : RED);
+                setForeground(contrastForeground(getBackground()));
             }
             return this;
         }
@@ -61,16 +69,20 @@ public final class Renderers {
         public Component getTableCellRendererComponent(JTable table, Object value,
                 boolean isSelected, boolean hasFocus, int row, int col) {
             Component cell = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col);
+            // Always ensure foreground matches the table theme
+            cell.setForeground(isSelected ? table.getSelectionForeground() : table.getForeground());
+            cell.setBackground(isSelected ? table.getSelectionBackground() : table.getBackground());
+
             SectionMessageTableModel model = (SectionMessageTableModel) table.getModel();
             MessageEntry msg = model.getMessageAt(row);
             if (msg == null) return cell;
 
             if (!msg.isEnabled()) {
                 cell.setBackground(isSelected ? DISABLED_SEL : DISABLED);
+                cell.setForeground(contrastForeground(cell.getBackground()));
             } else if (col == MessageTableModel.COL_REGEX && msg.isFailureRegexMode()) {
                 cell.setBackground(isSelected ? DISABLED_SEL : FAILURE_REGEX);
-            } else {
-                cell.setBackground(isSelected ? table.getSelectionBackground() : table.getBackground());
+                cell.setForeground(contrastForeground(cell.getBackground()));
             }
             return cell;
         }
@@ -93,7 +105,9 @@ public final class Renderers {
             UserEntry user = db.getUsers().get(row);
             if (!user.isEnabled()) {
                 cell.setBackground(isSelected ? DISABLED_SEL : DISABLED);
+                cell.setForeground(contrastForeground(cell.getBackground()));
             } else {
+                cell.setForeground(isSelected ? table.getSelectionForeground() : table.getForeground());
                 cell.setBackground(isSelected ? table.getSelectionBackground() : table.getBackground());
             }
             return cell;
