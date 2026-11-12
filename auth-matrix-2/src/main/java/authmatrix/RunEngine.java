@@ -98,7 +98,7 @@ public class RunEngine {
             for (RoleEntry r : db.getAllRoles()) {
                 if (message.isRoleAuthorized(r)) authorizedRoles.add(r);
             }
-            message.setRoleResult(role, checkResult(db, message, role, authorizedRoles));
+            updateRoleResult(db, message, role, authorizedRoles);
         } catch (Exception e) {
             api.logging().logToError("Run error: " + e.getMessage());
         } finally {
@@ -165,9 +165,14 @@ public class RunEngine {
             if (msg.isRoleAuthorized(role)) authorizedRoles.add(role);
         }
         for (RoleEntry role : db.getAllRoles()) {
-            boolean passed = checkResult(db, msg, role, authorizedRoles);
-            msg.setRoleResult(role, passed);
+            updateRoleResult(db, msg, role, authorizedRoles);
         }
+    }
+
+    private static void updateRoleResult(MatrixDB db, MessageEntry msg, RoleEntry role, List<RoleEntry> authorizedRoles) {
+        Boolean passed = checkResult(db, msg, role, authorizedRoles);
+        if (passed == null) msg.getRoleResults().remove(role);
+        else msg.setRoleResult(role, passed);
     }
 
     /**
@@ -219,9 +224,9 @@ public class RunEngine {
 
     /**
      * Evaluate whether the results for a given role meet expectations.
-     * Returns true if all users exclusively in this role behaved as expected.
+     * Returns true if all users exclusively in this role behaved as expected, or null when untested.
      */
-    private static boolean checkResult(MatrixDB db, MessageEntry msg, RoleEntry role, List<RoleEntry> authorizedRoles) {
+    private static Boolean checkResult(MatrixDB db, MessageEntry msg, RoleEntry role, List<RoleEntry> authorizedRoles) {
         for (UserEntry user : db.getUsers()) {
             if (!user.isEnabled()) continue;
             if (!user.hasRole(role)) continue;
@@ -237,7 +242,7 @@ public class RunEngine {
             if (inOtherAuthorizedRole) continue;
 
             MessageEntry.RunResult run = msg.getUserRuns().get(user);
-            if (run == null) return false;
+            if (run == null) return null;
             if (run.response() == null) return false;
 
             String response = new String(run.response());

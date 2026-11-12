@@ -54,13 +54,8 @@ public class UserTableModel extends AbstractTableModel {
         if (db.getLock().isLocked()) return;
         UserEntry user = db.getUsers().get(row);
         if (col == COL_NAME) {
-            String newName = (String) val;
-            if (db.findUserByName(newName) == null) {
-                // Rename single-user role too
-                RoleEntry singleRole = db.findRoleByName(user.getName() + MatrixDB.SINGLE_USER_SUFFIX);
-                if (singleRole != null) singleRole.setName(newName + MatrixDB.SINGLE_USER_SUFFIX);
-                user.setName(newName);
-            }
+            try { db.renameUser(user, (String) val); }
+            catch (IllegalArgumentException ignored) { /* Keep the previous, valid name during inline editing. */ }
         } else if (col == COL_COOKIES) {
             user.setCookies((String) val);
         } else {
@@ -77,7 +72,7 @@ public class UserTableModel extends AbstractTableModel {
 
     @Override
     public boolean isCellEditable(int row, int col) {
-        return true;
+        return !db.getLock().isLocked();
     }
 
     @Override

@@ -2,6 +2,7 @@ package authmatrix;
 
 import authmatrix.model.*;
 import authmatrix.ui.AuthMatrixTab;
+import com.google.gson.JsonObject;
 import burp.api.montoya.BurpExtension;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.HttpRequestResponse;
@@ -32,7 +33,22 @@ public class Extension implements BurpExtension {
         api.extension().setName("AuthMatrix - v" + VERSION);
 
         MatrixDB db = new MatrixDB();
-        AuthMatrixTab tab = new AuthMatrixTab(api, db);
+        SessionStore sessionStore = new SessionStore(api);
+        JsonObject ui = new JsonObject();
+        try {
+            String saved = sessionStore.load();
+            if (saved != null) ui = StateManager.restore(db, saved);
+        } catch (Exception ex) {
+            api.logging().logToError("Session restore failed: " + ex.getMessage());
+        }
+        JsonObject restoredUi = ui;
+        AuthMatrixTab[] tabRef = new AuthMatrixTab[1];
+        try {
+            Runnable createTab = () -> tabRef[0] = new AuthMatrixTab(api, db, sessionStore, restoredUi);
+            if (SwingUtilities.isEventDispatchThread()) createTab.run();
+            else SwingUtilities.invokeAndWait(createTab);
+        } catch (Exception ex) { throw new IllegalStateException("Could not create AuthMatrix UI", ex); }
+        AuthMatrixTab tab = tabRef[0];
 
         api.userInterface().registerSuiteTab("AuthMatrix", tab);
 
@@ -53,7 +69,7 @@ public class Extension implements BurpExtension {
             public ProxyResponseToBeSentAction handleResponseToBeSent(InterceptedResponse response) {
                 if (tab.isHighlightNewPathsEnabled()) {
                     String path = response.initiatingRequest().path();
-                    if (path != null && !db.hasPath(path)) {
+                    if (path != null && !tab.isHighlightPathIgnored(path) && !db.hasPath(path)) {
                         return ProxyResponseToBeSentAction.continueWith(
                                 response, Annotations.annotations().withHighlightColor(HighlightColor.ORANGE));
                     }
@@ -62,8 +78,13 @@ public class Extension implements BurpExtension {
             }
         });
 
-        api.extension().registerUnloadingHandler(() ->
-                KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(shortcutHandler));
+        api.extension().registerUnloadingHandler(() -> {
+            KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(shortcutHandler);
+            try {
+                if (SwingUtilities.isEventDispatchThread()) tab.shutdown();
+                else SwingUtilities.invokeAndWait(tab::shutdown);
+            } catch (Exception ex) { api.logging().logToError("Session save on unload failed: " + ex.getMessage()); }
+        });
 
         api.logging().logToOutput("AuthMatrix v" + VERSION + " loaded. Use Ctrl+Shift+M to send selected request(s).");
     }
@@ -149,6 +170,16 @@ public class Extension implements BurpExtension {
             sendItem.addActionListener(new SendToAuthMatrixAction(api, db, tab, selected, null));
             items.add(sendItem);
 
+            JMenuItem stopHighlightingItem = new JMenuItem("Stop highlighting request path(s)");
+            stopHighlightingItem.setToolTipText("Clear selected highlights and ignore these paths in future proxy traffic");
+            stopHighlightingItem.addActionListener(new StopHighlightingAction(tab, selected));
+            items.add(stopHighlightingItem);
+
+            JMenuItem ignorePatternItem = new JMenuItem("Ignore path pattern...");
+            ignorePatternItem.setToolTipText("Mask changing IDs or query values with wildcards");
+            ignorePatternItem.addActionListener(new IgnorePathPatternAction(tab, selected));
+            items.add(ignorePatternItem);
+
             // Send to specific section
             for (SectionEntry section : db.getSections()) {
                 JMenuItem sectionItem = new JMenuItem("Send request(s) to AuthMatrix [" + section.getName() + "]");
@@ -208,6 +239,48 @@ public class Extension implements BurpExtension {
     }
 
     // --- Action Listeners ---
+
+    private static class StopHighlightingAction implements ActionListener {
+        private final AuthMatrixTab tab;
+        private final List<HttpRequestResponse> selected;
+
+        StopHighlightingAction(AuthMatrixTab tab, List<HttpRequestResponse> selected) {
+            this.tab = tab;
+            this.selected = selected;
+        }
+
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            for (HttpRequestResponse reqResp : selected) {
+                if (reqResp.request() != null) tab.ignoreHighlightPath(reqResp.request().path());
+                reqResp.annotations().setHighlightColor(HighlightColor.NONE);
+            }
+            tab.persistSession();
+        }
+    }
+
+    private static class IgnorePathPatternAction implements ActionListener {
+        private final AuthMatrixTab tab;
+        private final List<HttpRequestResponse> selected;
+
+        IgnorePathPatternAction(AuthMatrixTab tab, List<HttpRequestResponse> selected) {
+            this.tab = tab;
+            this.selected = selected;
+        }
+
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            List<String> paths = selected.stream().map(HttpRequestResponse::request)
+                    .filter(java.util.Objects::nonNull).map(HttpRequest::path)
+                    .filter(java.util.Objects::nonNull).distinct().toList();
+            if (paths.isEmpty() || !tab.editIgnoredHighlightPathPatterns(paths)) return;
+            for (HttpRequestResponse reqResp : selected) {
+                if (reqResp.request() != null && tab.isHighlightPathIgnored(reqResp.request().path())) {
+                    reqResp.annotations().setHighlightColor(HighlightColor.NONE);
+                }
+            }
+        }
+    }
 
     private static class SendToAuthMatrixAction implements ActionListener {
         private final MontoyaApi api;

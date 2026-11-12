@@ -4,6 +4,7 @@ import java.awt.Color;
 
 public class SectionEntry {
     private String name;
+    private boolean collapsed;
     private final Color color;
 
     // Tableau 10 palette — readable, distinct
@@ -33,6 +34,8 @@ public class SectionEntry {
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+    public boolean isCollapsed() { return collapsed; }
+    public void setCollapsed(boolean collapsed) { this.collapsed = collapsed; }
     public Color getColor() { return color; }
 
     public static void resetColorIndex() { nextColorIndex = 0; }

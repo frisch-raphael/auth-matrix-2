@@ -53,6 +53,8 @@ AuthMatrix v2 is a complete rewrite of [AuthMatrix](https://github.com/SecurityI
 - **Rename/delete roles** — Right-click any role column header (in either the user table or request table) to rename or delete a role.
 
 #### Discovery
+- **Stop highlighting request paths** — Right-click selected requests and choose **Stop highlighting request path(s)** in AuthMatrix's extension menu to clear their highlights without adding them to the matrix. Future proxy requests with the exact same path (including the query string, across hosts and methods) are ignored. Ignored paths are saved with the session and JSON state; **Options > Resume highlighting ignored paths** clears the ignore list for future traffic.
+- **Mask dynamic paths** — Choose **Ignore path pattern...** from the same menu, replace changing IDs or values with `*`, and use the test field to preview a match before saving. For example, `/api/users/*/profile` matches any ID in that segment and `/search?nonce=*` matches any nonce value. `*` matches zero or more characters within one segment or query key/value (it stops at `/`, `?`, `&`, `#` and `=`); `**` can cross those boundaries. `/api/users/*?**` ignores changing query strings too. Other characters are literal; escape a literal star with `\*` and a backslash with `\\`. Patterns match the entire path, are case sensitive, and apply across hosts and methods. Manage or remove saved patterns under **Options > Edit ignored path patterns...**. Saving clears highlights only from selected requests that match; Cancel keeps everything unchanged. Patterns persist with the session and JSON state, and **Resume highlighting ignored paths** clears both exact paths and patterns for future traffic.
 - **Highlight New Paths** — Toggle button that highlights proxy requests whose path is not already in AuthMatrix. Helps spot untested endpoints during browsing.
 
 #### Other
@@ -78,12 +80,12 @@ No Jython installation required.
 
 1. Create roles for all privilege levels (Admin, User, Anonymous, etc.)
 2. Create users and assign them to roles via checkboxes
-3. Enter session tokens in the Cookies column (or add custom headers via "New Header")
+3. Enter session tokens in the Cookies column (or add custom headers via "Add > HTTP header")
 4. Optionally create sections to organize requests by feature area
 5. Right-click requests in Proxy History, Repeater, or Site Map and select "Send to AuthMatrix" (or press Ctrl+Shift+M). You can send directly into a section.
 6. Check the roles authorized for each request
 7. Customize the response regex per request
-8. Click Run and review the color-coded results
+8. Click Run all and review the color-coded results
 
 ### Color coding
 
@@ -102,3 +104,20 @@ No Jython installation required.
 ./gradlew jar      # Create the JAR (output in build/libs/)
 ./gradlew clean    # Clean build artifacts
 ```
+
+## Session recovery and file actions
+
+Users, roles, requests, original responses, results and UI layout are saved automatically every two seconds, after matrix redraws and on a clean unload. Reopening a saved Burp project restores that project's matrix. Default temporary projects (including Community Edition) recover the last temporary session from `~/.authmatrix/sessions/`. Concurrent temporary projects share that recovery slot. Renamed temporary projects use their project ID and should be exported before closing.
+
+The action bar keeps **Run all** and **Cancel** visible:
+
+- **Add**: user, role, HTTP header and request section.
+- **File > Save matrix**: export a v2 JSON file with its layout.
+- **File > Merge matrix**: add a saved file while keeping current work and layout. Identical users and roles are reused; conflicting users get an imported suffix to preserve both credentials. Same-name sections are combined; all imported requests get fresh IDs. Requests are not deduplicated.
+- **File > Replace matrix**: replace current contents after confirmation. Invalid files leave current work intact.
+- **File > Export HTML report** and **Clear matrix**: reporting and reset.
+- **Options**: highlight new proxy paths.
+
+Restored UI includes split positions, column widths, collapsed sections, selected request and viewer tab, request scroll position and highlighting preference. Recovery files contain the matrix's credentials and HTTP content. A hard process kill can lose edits since the last checkpoint.
+
+See [state format and merge rules](../JsonState.md). Jython v1 state files are unsupported; earlier v2 files remain supported.

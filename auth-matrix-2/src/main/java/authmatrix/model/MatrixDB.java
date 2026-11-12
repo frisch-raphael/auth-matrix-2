@@ -68,20 +68,75 @@ public class MatrixDB {
 
     public void deleteUser(UserEntry user) {
         lock.lock();
-        try { users.remove(user); } finally { lock.unlock(); }
+        try {
+            if (!users.remove(user)) return;
+            RoleEntry ownRole = findRoleByName(user.getName() + SINGLE_USER_SUFFIX);
+            if (ownRole != null && ownRole.isSingleUser()) deleteRole(ownRole);
+            for (MessageEntry msg : getMessages()) {
+                msg.getUserRuns().remove(user);
+                msg.getRoleResults().clear();
+            }
+        } finally { lock.unlock(); }
     }
 
-    public void moveUser(int fromIndex, int toIndex) {
+    public void renameUser(UserEntry user, String name) {
         lock.lock();
         try {
-            if (fromIndex < 0 || fromIndex >= users.size()) return;
-            if (toIndex < 0) toIndex = 0;
-            if (toIndex > users.size()) toIndex = users.size();
-            UserEntry user = users.remove(fromIndex);
-            if (toIndex > fromIndex) toIndex--;
-            users.add(toIndex, user);
-        } finally {
-            lock.unlock();
+            name = name == null ? "" : name.trim();
+            if (name.isEmpty()) throw new IllegalArgumentException("Enter a user name.");
+            UserEntry duplicate = findUserByName(name);
+            if (duplicate != null && duplicate != user) throw new IllegalArgumentException("A user already has that name.");
+            RoleEntry own = findRoleByName(user.getName() + SINGLE_USER_SUFFIX);
+            RoleEntry conflict = findRoleByName(name + SINGLE_USER_SUFFIX);
+            if (conflict != null && conflict != own) throw new IllegalArgumentException("A role already uses that user name.");
+            if (own != null && own.isSingleUser()) own.setName(name + SINGLE_USER_SUFFIX);
+            user.setName(name);
+        } finally { lock.unlock(); }
+    }
+
+    public UserEntry duplicateUser(UserEntry source) {
+        lock.lock();
+        try {
+            int number = 1;
+            String name;
+            do { name = source.getName() + (number == 1 ? " (copy)" : " (copy " + number + ")"); number++; }
+            while (findUserByName(name) != null || findRoleByName(name + SINGLE_USER_SUFFIX) != null);
+            UserEntry copy = getOrCreateUser(name);
+            copy.setCookies(source.getCookies());
+            copy.setEnabled(source.isEnabled());
+            for (int i = 0; i < headerCount; i++) copy.getHeaders().set(i, source.getHeaders().get(i));
+            RoleEntry originalOwn = findRoleByName(source.getName() + SINGLE_USER_SUFFIX);
+            RoleEntry copyOwn = findRoleByName(name + SINGLE_USER_SUFFIX);
+            for (RoleEntry role : roles) copy.setRole(role, role == copyOwn || role != originalOwn && source.hasRole(role));
+            for (MessageEntry msg : getMessages()) msg.setRoleAuthorized(copyOwn, msg.isRoleAuthorized(originalOwn));
+            return copy;
+        } finally { lock.unlock(); }
+    }
+
+    /** Move selected users one place, retaining their relative order. */
+    public void shiftUsers(List<UserEntry> selected, int direction) {
+        lock.lock();
+        try { shift(users, selected, direction); } finally { lock.unlock(); }
+    }
+
+    public void moveUsersBefore(List<UserEntry> selected, UserEntry before) {
+        lock.lock();
+        try {
+            if (selected.contains(before)) return;
+            List<UserEntry> ordered = users.stream().filter(selected::contains).toList();
+            if (before != null && !users.contains(before)) return;
+            users.removeAll(ordered);
+            users.addAll(before == null ? users.size() : users.indexOf(before), ordered);
+        } finally { lock.unlock(); }
+    }
+
+    private static <T> void shift(List<T> list, List<?> selected, int direction) {
+        if (direction < 0) {
+            for (int i = 1; i < list.size(); i++)
+                if (selected.contains(list.get(i)) && !selected.contains(list.get(i - 1))) Collections.swap(list, i, i - 1);
+        } else {
+            for (int i = list.size() - 2; i >= 0; i--)
+                if (selected.contains(list.get(i)) && !selected.contains(list.get(i + 1))) Collections.swap(list, i, i + 1);
         }
     }
 
@@ -201,9 +256,76 @@ public class MatrixDB {
         }
     }
 
-    public void deleteSection(SectionEntry section) {
+    /** Removing a section keeps its requests explicitly at root, never in the preceding section. */
+    public void deleteSection(SectionEntry section) { deleteSection(section, false); }
+
+    public void deleteSection(SectionEntry section, boolean deleteRequests) {
         lock.lock();
-        try { rows.remove(section); } finally { lock.unlock(); }
+        try {
+            if (!rows.contains(section)) return;
+            List<MessageEntry> messages = getMessagesInSection(section);
+            rows.removeAll(messages);
+            rows.remove(section);
+            if (!deleteRequests) rows.addAll(getRootMessages().size(), messages);
+        } finally { lock.unlock(); }
+    }
+
+    /** Reorder a complete section block while keeping root requests at root. */
+    public void moveSection(SectionEntry section, int index) {
+        lock.lock();
+        try {
+            if (!rows.contains(section)) return;
+            int start = rows.indexOf(section), end = start + 1;
+            while (end < rows.size() && rows.get(end) instanceof MessageEntry) end++;
+            List<Object> block = new ArrayList<>(rows.subList(start, end));
+            rows.subList(start, end).clear();
+            List<SectionEntry> remaining = getSections();
+            index = Math.max(0, Math.min(index, remaining.size()));
+            int insertAt = index == remaining.size() ? rows.size() : rows.indexOf(remaining.get(index));
+            rows.addAll(insertAt, block);
+        } finally { lock.unlock(); }
+    }
+
+    public void moveMessagesToSection(List<MessageEntry> selected, SectionEntry target, MessageEntry before) {
+        lock.lock();
+        try {
+            if (target != null && !rows.contains(target) || selected.contains(before)) return;
+            if (before != null && (!rows.contains(before) || getSectionForMessage(before) != target)) return;
+            List<MessageEntry> ordered = getMessages().stream().filter(selected::contains).toList();
+            rows.removeAll(ordered);
+            int insertAt;
+            if (before != null) insertAt = rows.indexOf(before);
+            else if (target == null) insertAt = getRootMessages().size();
+            else insertAt = rows.indexOf(target) + 1 + getMessagesInSection(target).size();
+            rows.addAll(insertAt, ordered);
+        } finally { lock.unlock(); }
+    }
+
+    public void shiftMessages(List<MessageEntry> selected, int direction) {
+        lock.lock();
+        try {
+            List<SectionEntry> sections = new ArrayList<>(); sections.add(null); sections.addAll(getSections());
+            for (SectionEntry section : sections) {
+                List<MessageEntry> messages = section == null ? getRootMessages() : getMessagesInSection(section);
+                if (messages.isEmpty()) continue;
+                int start = rows.indexOf(messages.getFirst());
+                shift(messages, selected, direction);
+                for (int i = 0; i < messages.size(); i++) rows.set(start + i, messages.get(i));
+            }
+        } finally { lock.unlock(); }
+    }
+
+    public MessageEntry duplicateMessage(MessageEntry source) {
+        lock.lock();
+        try {
+            MessageEntry copy = new MessageEntry(nextMessageId++, source.getName() + " (copy)", source.getHost(),
+                    source.getPort(), source.isSecure(), source.getRequest() == null ? null : source.getRequest().clone(),
+                    source.getResponse() == null ? null : source.getResponse().clone(), source.getRegex());
+            copy.setEnabled(source.isEnabled()); copy.setFailureRegexMode(source.isFailureRegexMode());
+            for (RoleEntry role : roles) copy.setRoleAuthorized(role, source.isRoleAuthorized(role));
+            rows.add(rows.indexOf(source) + 1, copy);
+            return copy;
+        } finally { lock.unlock(); }
     }
 
     public SectionEntry findSectionByName(String name) {
@@ -263,27 +385,6 @@ public class MatrixDB {
         return false;
     }
 
-    // --- Row operations (unified for messages + sections) ---
-
-    public void moveRow(int fromIndex, int toIndex) {
-        lock.lock();
-        try {
-            if (fromIndex < 0 || fromIndex >= rows.size()) return;
-            if (toIndex < 0) toIndex = 0;
-            if (toIndex > rows.size()) toIndex = rows.size();
-            // Don't allow dropping a section into another section
-            Object moving = rows.get(fromIndex);
-            Object target = (toIndex > 0 && toIndex <= rows.size()) ? rows.get(Math.min(toIndex, rows.size() - 1)) : null;
-            if (moving instanceof SectionEntry && target instanceof SectionEntry) return;
-
-            Object row = rows.remove(fromIndex);
-            if (toIndex > fromIndex) toIndex--;
-            rows.add(toIndex, row);
-        } finally {
-            lock.unlock();
-        }
-    }
-
     // --- Headers ---
 
     public void addHeader() {
@@ -336,6 +437,19 @@ public class MatrixDB {
         } finally {
             lock.unlock();
         }
+    }
+
+    public void replaceWith(MatrixDB source) {
+        lock.lock();
+        try {
+            clear();
+            users.addAll(source.users);
+            roles.addAll(source.roles);
+            rows.addAll(source.rows);
+            headerCount = source.headerCount;
+            knownRegexes.addAll(source.knownRegexes);
+            nextMessageId = source.nextMessageId;
+        } finally { lock.unlock(); }
     }
 
     public void setNextMessageId(int id) { this.nextMessageId = id; }

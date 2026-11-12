@@ -4,6 +4,9 @@ import authmatrix.model.*;
 import authmatrix.HtmlExporter;
 import authmatrix.RunEngine;
 import authmatrix.StateManager;
+import authmatrix.SessionStore;
+import authmatrix.PathMask;
+import com.google.gson.*;
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.message.requests.HttpRequest;
 import burp.api.montoya.http.message.responses.HttpResponse;
@@ -19,6 +22,7 @@ import java.awt.event.*;
 import java.io.*;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.ConcurrentSkipListSet;
 
 public class AuthMatrixTab extends JPanel {
     private final MontoyaApi api;
@@ -36,21 +40,76 @@ public class AuthMatrixTab extends JPanel {
     // Multi-table section UI
     private final Box sectionsBox = new Box(BoxLayout.Y_AXIS);
     private final JScrollPane messageScrollPane;
+    private final JScrollPane userScrollPane;
     private final List<SectionPanel> sectionPanels = new ArrayList<>();
     private JTable activeMessageTable;
     private TableColumnModel sharedColumnModel;
 
     private final Map<MessageEntry, HttpRequestEditor> editableEditors = new HashMap<>();
-    private final JToggleButton highlightNewPathsToggle;
+    private final JCheckBoxMenuItem highlightNewPathsToggle;
+    private final Set<String> ignoredHighlightPaths = new ConcurrentSkipListSet<>();
+    private volatile List<PathMask> ignoredHighlightPathPatterns = List.of();
+    private final JSplitPane topSplit;
+    private final JSplitPane mainSplit;
+    private final SessionStore sessionStore;
+    private final javax.swing.Timer autosaveTimer;
+    private final JMenu addMenu = new JMenu("Add");
+    private final JMenu fileMenu = new JMenu("File");
+    private JsonObject pendingUi;
+    private boolean restoringUi;
+    private String lastSnapshot;
+    private List<Integer> userWidths = new ArrayList<>();
+    private List<Integer> messageWidths = new ArrayList<>();
     private TableCellRenderer origUserStringRenderer;
     private TableCellRenderer origUserBooleanRenderer;
 
     public boolean isHighlightNewPathsEnabled() { return highlightNewPathsToggle.isSelected(); }
 
-    public AuthMatrixTab(MontoyaApi api, MatrixDB db) {
+    public boolean isHighlightPathIgnored(String path) {
+        return path != null && (ignoredHighlightPaths.contains(path)
+                || ignoredHighlightPathPatterns.stream().anyMatch(pattern -> pattern.matches(path)));
+    }
+
+    public void ignoreHighlightPath(String path) {
+        if (path == null) return;
+        ignoredHighlightPaths.add(path);
+        // Keep changes if Burp has not laid out the restored tab yet.
+        if (restoringUi) pendingUi.add("ignoredHighlightPaths", new Gson().toJsonTree(ignoredHighlightPaths));
+    }
+
+    private void resumeHighlightingIgnoredPaths() {
+        ignoredHighlightPaths.clear();
+        ignoredHighlightPathPatterns = List.of();
+        if (restoringUi) pendingUi.add("ignoredHighlightPaths", new JsonArray());
+        if (restoringUi) pendingUi.add("ignoredHighlightPathPatterns", new JsonArray());
+        persistSession();
+    }
+
+    public void setIgnoredHighlightPathPatterns(List<String> expressions) {
+        List<PathMask> compiled = expressions.stream().distinct().map(PathMask::new).toList();
+        ignoredHighlightPathPatterns = compiled;
+        if (restoringUi) pendingUi.add("ignoredHighlightPathPatterns", new Gson().toJsonTree(expressions));
+    }
+
+    public boolean editIgnoredHighlightPathPatterns(List<String> paths) {
+        List<String> initial = new ArrayList<>(ignoredHighlightPathPatterns.stream().map(PathMask::expression).toList());
+        for (String path : paths) {
+            String literal = PathMask.literal(path);
+            if (!initial.contains(literal)) initial.add(literal);
+        }
+        Optional<List<String>> edited = PathMaskEditor.showDialog(this, initial, paths.isEmpty() ? "" : paths.getFirst());
+        if (edited.isEmpty()) return false;
+        setIgnoredHighlightPathPatterns(edited.get());
+        persistSession();
+        return true;
+    }
+
+    public AuthMatrixTab(MontoyaApi api, MatrixDB db, SessionStore sessionStore, JsonObject ui) {
         super(new BorderLayout());
         this.api = api;
         this.db = db;
+        this.sessionStore = sessionStore;
+        this.pendingUi = ui;
         this.engine = new RunEngine(api, db);
 
         // --- User Table ---
@@ -68,62 +127,68 @@ public class AuthMatrixTab extends JPanel {
         // --- Viewer Tabs ---
         viewerTabs = new JTabbedPane();
 
-        // --- Buttons ---
-        runButton = new JButton("Run");
+        // Keep the frequent run controls visible; group setup and file actions in native menus.
+        runButton = new JButton("Run all");
         cancelButton = new JButton("Cancel");
         cancelButton.setEnabled(false);
-        JButton newUserBtn = new JButton("New User");
-        JButton newRoleBtn = new JButton("New Role");
-        JButton newHeaderBtn = new JButton("New Header");
-        JButton newSectionBtn = new JButton("New Section");
-        JButton saveBtn = new JButton("Save");
-        JButton loadBtn = new JButton("Load");
-        JButton exportBtn = new JButton("Export HTML");
-        JButton clearBtn = new JButton("Clear");
-
-        statusLabel = new JLabel(" ");
-        statusLabel.setFont(statusLabel.getFont().deriveFont(Font.ITALIC));
-        statusLabel.setForeground(new Color(0x66, 0x66, 0x99));
-
         runButton.addActionListener(e -> onRun());
         cancelButton.addActionListener(e -> engine.cancel());
-        newUserBtn.addActionListener(e -> onNewUser());
-        newRoleBtn.addActionListener(e -> onNewRole());
-        newHeaderBtn.addActionListener(e -> onNewHeader());
-        newSectionBtn.addActionListener(e -> onNewSection());
-        saveBtn.addActionListener(e -> onSave());
-        loadBtn.addActionListener(e -> onLoad());
-        exportBtn.addActionListener(e -> onExportHtml());
-        clearBtn.addActionListener(e -> onClear());
+        runButton.setToolTipText("Run every enabled request for all enabled users");
+        statusLabel = new JLabel("Ready");
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
 
-        JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        buttonRow.add(runButton); buttonRow.add(cancelButton);
-        buttonRow.add(createSeparator());
-        buttonRow.add(newUserBtn); buttonRow.add(newRoleBtn);
-        buttonRow.add(newHeaderBtn); buttonRow.add(newSectionBtn);
-        buttonRow.add(createSeparator());
-        buttonRow.add(saveBtn); buttonRow.add(loadBtn); buttonRow.add(exportBtn); buttonRow.add(clearBtn);
-        buttonRow.add(createSeparator());
-        highlightNewPathsToggle = new JToggleButton("Highlight New Paths");
-        highlightNewPathsToggle.setToolTipText(
-                "When enabled, proxy requests whose path is not already in AuthMatrix " +
-                "are highlighted orange in Proxy History. Helps spot untested endpoints.");
-        buttonRow.add(highlightNewPathsToggle);
+        addMenu.setMnemonic(KeyEvent.VK_A);
+        addMenuItem(addMenu, "User...", e -> onNewUser());
+        addMenuItem(addMenu, "Role...", e -> onNewRole());
+        addMenuItem(addMenu, "HTTP header", e -> onNewHeader());
+        addMenu.addSeparator();
+        addMenuItem(addMenu, "Request section...", e -> onNewSection());
+        fileMenu.setMnemonic(KeyEvent.VK_F);
+        addMenuItem(fileMenu, "Save matrix...", e -> onSave());
+        addMenuItem(fileMenu, "Merge matrix...", e -> onLoad(true));
+        addMenuItem(fileMenu, "Replace matrix...", e -> onLoad(false));
+        fileMenu.addSeparator();
+        addMenuItem(fileMenu, "Export HTML report...", e -> onExportHtml());
+        fileMenu.addSeparator();
+        addMenuItem(fileMenu, "Clear matrix...", e -> onClear());
+        JMenu options = new JMenu("Options");
+        options.setMnemonic(KeyEvent.VK_O);
+        highlightNewPathsToggle = new JCheckBoxMenuItem("Highlight new proxy paths");
+        highlightNewPathsToggle.setToolTipText("Highlight proxy requests orange when their path is not in this matrix");
+        options.add(highlightNewPathsToggle);
+        JMenuItem editPatterns = new JMenuItem("Edit ignored path patterns...");
+        editPatterns.addActionListener(new EditHighlightPatternsAction());
+        options.add(editPatterns);
+        JMenuItem resumeHighlighting = new JMenuItem("Resume highlighting ignored paths");
+        resumeHighlighting.setToolTipText("Allow ignored paths to be highlighted in future proxy traffic");
+        resumeHighlighting.addActionListener(new ResumeHighlightingAction());
+        options.add(resumeHighlighting);
+        JMenuBar menus = new JMenuBar();
+        menus.setBorder(BorderFactory.createEmptyBorder());
+        menus.add(addMenu);
+        menus.add(fileMenu);
+        menus.add(options);
 
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        actions.add(runButton);
+        actions.add(cancelButton);
+        actions.add(createSeparator());
+        actions.add(menus);
         JPanel buttons = new JPanel(new BorderLayout());
-        buttons.add(buttonRow, BorderLayout.CENTER);
+        buttons.add(actions, BorderLayout.NORTH);
         buttons.add(statusLabel, BorderLayout.SOUTH);
 
         // --- Layout ---
-        JScrollPane userScroll = new JScrollPane(userTable);
-        JSplitPane topSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, userScroll, messageScrollPane);
+        userScrollPane = new JScrollPane(userTable);
+        userScrollPane.setColumnHeaderView(userTable.getTableHeader());
+        topSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, userScrollPane, messageScrollPane);
         topSplit.setResizeWeight(0.3);
 
         JPanel bottomPanel = new JPanel(new BorderLayout());
         bottomPanel.add(viewerTabs, BorderLayout.CENTER);
         bottomPanel.add(buttons, BorderLayout.SOUTH);
 
-        JSplitPane mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topSplit, bottomPanel);
+        mainSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topSplit, bottomPanel);
         mainSplit.setResizeWeight(0.5);
 
         add(mainSplit, BorderLayout.CENTER);
@@ -131,7 +196,20 @@ public class AuthMatrixTab extends JPanel {
         origUserStringRenderer = userTable.getDefaultRenderer(String.class);
         origUserBooleanRenderer = userTable.getDefaultRenderer(Boolean.class);
         applyUserRenderers();
+        applyUserColumnWidths();
+        installUserPopups();
         rebuildSectionPanels();
+        userTable.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
+        userTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        applyUiState(ui);
+        autosaveTimer = new javax.swing.Timer(2000, e -> persistSession());
+        autosaveTimer.start();
+    }
+
+    private static void addMenuItem(JMenu menu, String label, ActionListener action) {
+        JMenuItem item = new JMenuItem(label);
+        item.addActionListener(action);
+        menu.add(item);
     }
 
     // ========== Section Panel Management ==========
@@ -169,6 +247,17 @@ public class AuthMatrixTab extends JPanel {
         if (sharedColumnModel == null) {
             sharedColumnModel = panel.table.getColumnModel();
             applyColumnWidths(sharedColumnModel);
+            restoreWidths(sharedColumnModel, messageWidths);
+            sharedColumnModel.addColumnModelListener(new javax.swing.event.TableColumnModelListener() {
+                public void columnMarginChanged(javax.swing.event.ChangeEvent e) {
+                    for (SectionPanel item : sectionPanels) item.resizeToFit();
+                    sectionsBox.revalidate();
+                }
+                public void columnAdded(javax.swing.event.TableColumnModelEvent e) { }
+                public void columnRemoved(javax.swing.event.TableColumnModelEvent e) { }
+                public void columnMoved(javax.swing.event.TableColumnModelEvent e) { }
+                public void columnSelectionChanged(javax.swing.event.ListSelectionEvent e) { }
+            });
         } else {
             panel.table.setColumnModel(sharedColumnModel);
         }
@@ -184,8 +273,15 @@ public class AuthMatrixTab extends JPanel {
         if (colModel.getColumnCount() > 0) {
             colModel.getColumn(0).setMinWidth(30);
             colModel.getColumn(0).setMaxWidth(45);
+            colModel.getColumn(0).setPreferredWidth(40);
+            colModel.getColumn(1).setPreferredWidth(360);
+            colModel.getColumn(2).setPreferredWidth(240);
             colModel.getColumn(1).setMinWidth(300);
             colModel.getColumn(2).setMinWidth(150);
+        }
+        for (int i = 3; i < colModel.getColumnCount(); i++) {
+            colModel.getColumn(i).setMinWidth(100);
+            colModel.getColumn(i).setPreferredWidth(120);
         }
         if (colModel.getColumnCount() > 2) {
             JComboBox<String> regexCombo = new JComboBox<>(db.getKnownRegexes().toArray(new String[0]));
@@ -219,6 +315,7 @@ public class AuthMatrixTab extends JPanel {
         SectionPanel(SectionEntry section) {
             super(new BorderLayout());
             this.section = section;
+            this.collapsed = section != null && section.isCollapsed();
             this.model = new SectionMessageTableModel(db);
 
             List<MessageEntry> msgs = section == null ? db.getRootMessages() : db.getMessagesInSection(section);
@@ -238,6 +335,8 @@ public class AuthMatrixTab extends JPanel {
                     return super.editCellAt(row, col, e);
                 }
             };
+            table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+            table.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
             table.setDragEnabled(true);
             table.setDropMode(DropMode.INSERT_ROWS);
             RowTransferHandler handler = new RowTransferHandler(table, db, true, section);
@@ -303,6 +402,7 @@ public class AuthMatrixTab extends JPanel {
                 add(headerLabel, BorderLayout.NORTH);
             }
 
+            table.setVisible(!collapsed);
             add(table, BorderLayout.CENTER);
             resizeToFit();
         }
@@ -313,6 +413,7 @@ public class AuthMatrixTab extends JPanel {
 
         private void toggleCollapse() {
             collapsed = !collapsed;
+            if (section != null) section.setCollapsed(collapsed);
             table.setVisible(!collapsed);
             if (headerLabel != null) headerLabel.setText(getHeaderText());
             resizeToFit();
@@ -324,7 +425,7 @@ public class AuthMatrixTab extends JPanel {
             if (collapsed) {
                 int h = section != null ? HEADER_HEIGHT : 0;
                 setMaximumSize(new Dimension(Integer.MAX_VALUE, h));
-                setPreferredSize(new Dimension(0, h));
+                setPreferredSize(new Dimension(table.getColumnModel().getTotalColumnWidth(), h));
             } else {
                 int rows = model.getRowCount();
                 int tableHeight = rows > 0 ? rows * table.getRowHeight() : EMPTY_ROW_HEIGHT;
@@ -332,7 +433,7 @@ public class AuthMatrixTab extends JPanel {
                 table.setPreferredSize(new Dimension(0, tableHeight));
                 int totalHeight = tableHeight + (section != null ? HEADER_HEIGHT : 0);
                 setMaximumSize(new Dimension(Integer.MAX_VALUE, totalHeight));
-                setPreferredSize(new Dimension(0, totalHeight));
+                setPreferredSize(new Dimension(table.getColumnModel().getTotalColumnWidth(), totalHeight));
             }
             revalidate();
         }
@@ -347,17 +448,33 @@ public class AuthMatrixTab extends JPanel {
 
     public void redrawAll() {
         Runnable doRedraw = () -> {
+            List<MessageEntry> selected = getSelectedMessages();
+            int viewerIndex = viewerTabs.getSelectedIndex();
+            captureWidths();
             saveEditorChanges();
             userModel.fireTableStructureChanged();
             applyUserRenderers();
             applyUserColumnWidths();
+            restoreWidths(userTable.getColumnModel(), userWidths);
+            installUserPopups();
             rebuildSectionPanels();
+            for (SectionPanel panel : sectionPanels) {
+                for (int i = 0; i < panel.model.getRowCount(); i++) {
+                    if (selected.contains(panel.model.getMessageAt(i))) panel.table.addRowSelectionInterval(i, i);
+                }
+            }
+            if (viewerIndex >= 0 && viewerIndex < viewerTabs.getTabCount()) viewerTabs.setSelectedIndex(viewerIndex);
+            persistSession();
         };
         if (SwingUtilities.isEventDispatchThread()) doRedraw.run();
         else SwingUtilities.invokeLater(doRedraw);
     }
 
     private void applyUserColumnWidths() {
+        for (int i = 2; i < userTable.getColumnCount(); i++) {
+            userTable.getColumnModel().getColumn(i).setMinWidth(100);
+            userTable.getColumnModel().getColumn(i).setPreferredWidth(120);
+        }
         if (userTable.getColumnCount() > 1) {
             userTable.getColumnModel().getColumn(0).setMinWidth(150);
             userTable.getColumnModel().getColumn(0).setMaxWidth(1000);
@@ -427,7 +544,6 @@ public class AuthMatrixTab extends JPanel {
             HttpRequestEditor editor = entry.getValue();
             if (editor.isModified()) entry.getKey().setRequest(editor.getRequest().toByteArray().getBytes());
         }
-        editableEditors.clear();
     }
 
     private HttpRequest buildHttpRequest(MessageEntry msg) {
@@ -688,19 +804,187 @@ public class AuthMatrixTab extends JPanel {
         installRoleHeaderPopup(userTable.getTableHeader(), 2 + db.getHeaderCount(), null);
     }
 
+    private void commitTableEdits() {
+        if (userTable.isEditing()) userTable.getCellEditor().stopCellEditing();
+        for (SectionPanel panel : sectionPanels)
+            if (panel.table.isEditing()) panel.table.getCellEditor().stopCellEditing();
+    }
+
+    private static List<Integer> widths(TableColumnModel model) {
+        List<Integer> result = new ArrayList<>();
+        if (model != null) for (int i = 0; i < model.getColumnCount(); i++) result.add(model.getColumn(i).getWidth());
+        return result;
+    }
+
+    private void captureWidths() {
+        userWidths = widths(userTable.getColumnModel());
+        messageWidths = widths(sharedColumnModel);
+    }
+
+    private static void restoreWidths(TableColumnModel model, List<Integer> widths) {
+        for (int i = 0; i < Math.min(model.getColumnCount(), widths.size()); i++) {
+            model.getColumn(i).setPreferredWidth(widths.get(i));
+            model.getColumn(i).setWidth(widths.get(i));
+        }
+    }
+
+    public JsonObject captureUiState() {
+        if (restoringUi && pendingUi != null) return pendingUi.deepCopy();
+        captureWidths();
+        JsonObject ui = new JsonObject();
+        ui.addProperty("topDivider", topSplit.getDividerLocation());
+        ui.addProperty("mainDivider", mainSplit.getDividerLocation());
+        ui.addProperty("highlightNewPaths", isHighlightNewPathsEnabled());
+        ui.add("ignoredHighlightPaths", new Gson().toJsonTree(ignoredHighlightPaths));
+        ui.add("ignoredHighlightPathPatterns", new Gson().toJsonTree(
+                ignoredHighlightPathPatterns.stream().map(PathMask::expression).toList()));
+        ui.add("userWidths", new Gson().toJsonTree(userWidths));
+        ui.add("messageWidths", new Gson().toJsonTree(messageWidths));
+        ui.addProperty("userScrollY", userScrollPane.getVerticalScrollBar().getValue());
+        ui.addProperty("userScrollX", userScrollPane.getHorizontalScrollBar().getValue());
+        ui.addProperty("scrollY", messageScrollPane.getVerticalScrollBar().getValue());
+        ui.addProperty("scrollX", messageScrollPane.getHorizontalScrollBar().getValue());
+        ui.addProperty("viewerTab", viewerTabs.getSelectedIndex());
+        Component viewer = viewerTabs.getSelectedComponent();
+        if (viewer instanceof JTabbedPane tabs) ui.addProperty("messageTab", tabs.getSelectedIndex());
+        List<MessageEntry> selected = getSelectedMessages();
+        if (!selected.isEmpty()) ui.addProperty("selectedRequest", selected.getFirst().getId());
+        return ui;
+    }
+
+    private static List<Integer> readWidths(JsonObject ui, String key) {
+        List<Integer> result = new ArrayList<>();
+        if (ui.has(key) && ui.get(key).isJsonArray()) {
+            for (JsonElement value : ui.getAsJsonArray(key)) {
+                try { result.add(Math.max(30, Math.min(3000, value.getAsInt()))); }
+                catch (RuntimeException ignored) { result.add(100); }
+            }
+        }
+        return result;
+    }
+
+    private static int uiInt(JsonObject ui, String key, int fallback) {
+        try { return ui.has(key) ? ui.get(key).getAsInt() : fallback; }
+        catch (RuntimeException ignored) { return fallback; }
+    }
+
+    private void applyUiState(JsonObject ui) {
+        pendingUi = ui == null ? new JsonObject() : ui;
+        userWidths = readWidths(pendingUi, "userWidths");
+        messageWidths = readWidths(pendingUi, "messageWidths");
+        try { highlightNewPathsToggle.setSelected(pendingUi.has("highlightNewPaths") && pendingUi.get("highlightNewPaths").getAsBoolean()); }
+        catch (RuntimeException ignored) { }
+        ignoredHighlightPaths.clear();
+        if (pendingUi.has("ignoredHighlightPaths") && pendingUi.get("ignoredHighlightPaths").isJsonArray()) {
+            for (JsonElement value : pendingUi.getAsJsonArray("ignoredHighlightPaths")) {
+                if (value.isJsonPrimitive() && value.getAsJsonPrimitive().isString()) {
+                    ignoredHighlightPaths.add(value.getAsString());
+                }
+            }
+        }
+        List<PathMask> restoredPatterns = new ArrayList<>();
+        if (pendingUi.has("ignoredHighlightPathPatterns") && pendingUi.get("ignoredHighlightPathPatterns").isJsonArray()) {
+            for (JsonElement value : pendingUi.getAsJsonArray("ignoredHighlightPathPatterns")) {
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) continue;
+                try { restoredPatterns.add(new PathMask(value.getAsString())); }
+                catch (IllegalArgumentException ex) { api.logging().logToError("Skipped invalid ignored path pattern: " + ex.getMessage()); }
+            }
+        }
+        ignoredHighlightPathPatterns = List.copyOf(restoredPatterns);
+        restoreWidths(userTable.getColumnModel(), userWidths);
+        if (sharedColumnModel != null) restoreWidths(sharedColumnModel, messageWidths);
+        restoringUi = true;
+        // Burp may register the tab before giving it a usable size. Restore dividers after layout.
+        if (getHeight() > 0) SwingUtilities.invokeLater(this::restoreUiAfterLayout);
+        else addComponentListener(new ComponentAdapter() {
+            @Override public void componentResized(ComponentEvent e) { restoreUiAfterLayout(); }
+            @Override public void componentShown(ComponentEvent e) { restoreUiAfterLayout(); }
+        });
+    }
+
+    private void restoreUiAfterLayout() {
+        if (!restoringUi || getHeight() <= 0) return;
+        JsonObject ui = pendingUi;
+        restoringUi = false;
+        mainSplit.setDividerLocation(Math.max(0, Math.min(getHeight() - 80, uiInt(ui, "mainDivider", getHeight() / 2))));
+        topSplit.setDividerLocation(Math.max(0, Math.min(topSplit.getHeight() - 40, uiInt(ui, "topDivider", 150))));
+        int selected = uiInt(ui, "selectedRequest", -1);
+        for (SectionPanel panel : sectionPanels) {
+            for (int i = 0; i < panel.model.getRowCount(); i++) {
+                if (panel.model.getMessageAt(i).getId() == selected) panel.table.setRowSelectionInterval(i, i);
+            }
+        }
+        int tab = uiInt(ui, "viewerTab", 0);
+        if (tab >= 0 && tab < viewerTabs.getTabCount()) viewerTabs.setSelectedIndex(tab);
+        if (viewerTabs.getSelectedComponent() instanceof JTabbedPane tabs) {
+            int inner = uiInt(ui, "messageTab", 0);
+            if (inner >= 0 && inner < tabs.getTabCount()) tabs.setSelectedIndex(inner);
+        }
+        SwingUtilities.invokeLater(() -> {
+            userScrollPane.getVerticalScrollBar().setValue(uiInt(ui, "userScrollY", 0));
+            userScrollPane.getHorizontalScrollBar().setValue(uiInt(ui, "userScrollX", 0));
+            messageScrollPane.getVerticalScrollBar().setValue(uiInt(ui, "scrollY", 0));
+            messageScrollPane.getHorizontalScrollBar().setValue(uiInt(ui, "scrollX", 0));
+        });
+    }
+
+    public void persistSession() {
+        if (!db.getLock().tryLock()) return; // A run owns the matrix; save the complete result when it finishes.
+        try {
+            saveEditorChanges();
+            String json = StateManager.serialize(db, captureUiState());
+            if (!json.equals(lastSnapshot)) {
+                sessionStore.save(json);
+                lastSnapshot = json;
+            }
+        } catch (Exception ex) {
+            api.logging().logToError("Automatic save failed: " + ex.getMessage());
+            statusLabel.setText("Automatic save failed. Use File > Save matrix to save a copy.");
+        } finally { db.getLock().unlock(); }
+    }
+
+    public void shutdown() {
+        engine.cancel();
+        autosaveTimer.stop();
+        commitTableEdits();
+        persistSession();
+    }
+
     // ========== Button Actions ==========
 
+    private class ResumeHighlightingAction implements ActionListener {
+        @Override public void actionPerformed(ActionEvent e) { resumeHighlightingIgnoredPaths(); }
+    }
+
+    private class EditHighlightPatternsAction implements ActionListener {
+        @Override public void actionPerformed(ActionEvent e) { editIgnoredHighlightPathPatterns(List.of()); }
+    }
+
     private void onRun() {
-        saveEditorChanges(); viewerTabs.removeAll();
+        commitTableEdits(); saveEditorChanges(); viewerTabs.removeAll(); editableEditors.clear();
         new Thread(() -> engine.run(null, this::setRunning, this::setProgress, this::redrawAll)).start();
     }
 
     private void setRunning(boolean running) {
-        SwingUtilities.invokeLater(() -> { runButton.setEnabled(!running); cancelButton.setEnabled(running); });
+        SwingUtilities.invokeLater(() -> {
+            runButton.setEnabled(!running); cancelButton.setEnabled(running);
+            addMenu.setEnabled(!running); fileMenu.setEnabled(!running);
+            userTable.setEnabled(!running);
+            setPopupEnabled(userTable.getComponentPopupMenu(), !running);
+            for (SectionPanel panel : sectionPanels) {
+                panel.table.setEnabled(!running);
+                setPopupEnabled(panel.table.getComponentPopupMenu(), !running);
+                if (panel.headerLabel != null) setPopupEnabled(panel.headerLabel.getComponentPopupMenu(), !running);
+            }
+        });
+    }
+
+    private static void setPopupEnabled(JPopupMenu popup, boolean enabled) {
+        if (popup != null) for (Component item : popup.getComponents()) item.setEnabled(enabled);
     }
 
     private void setProgress(String text) {
-        SwingUtilities.invokeLater(() -> statusLabel.setText(text == null || text.isEmpty() ? " " : text));
+        SwingUtilities.invokeLater(() -> statusLabel.setText(text == null || text.isEmpty() ? "Ready" : text));
     }
 
     public void highlightTab() {
@@ -752,6 +1036,7 @@ public class AuthMatrixTab extends JPanel {
     }
 
     private void onSave() {
+        commitTableEdits();
         saveEditorChanges();
         int result = fileChooser.showSaveDialog(this);
         if (result != JFileChooser.APPROVE_OPTION) return;
@@ -760,7 +1045,7 @@ public class AuthMatrixTab extends JPanel {
             int confirm = JOptionPane.showConfirmDialog(this, "The file exists, overwrite?", "Existing File", JOptionPane.YES_NO_OPTION);
             if (confirm != JOptionPane.YES_OPTION) return;
         }
-        try { StateManager.save(db, file); }
+        try { StateManager.writeAtomically(file, StateManager.serialize(db, captureUiState())); }
         catch (IOException ex) {
             api.logging().logToError("Save failed: " + ex.getMessage());
             JOptionPane.showMessageDialog(this, "Save failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
@@ -791,13 +1076,37 @@ public class AuthMatrixTab extends JPanel {
         }
     }
 
-    private void onLoad() {
-        int result = fileChooser.showOpenDialog(this);
-        if (result != JFileChooser.APPROVE_OPTION) return;
-        try { StateManager.load(db, fileChooser.getSelectedFile()); redrawAll(); }
-        catch (IOException ex) {
-            api.logging().logToError("Load failed: " + ex.getMessage());
-            JOptionPane.showMessageDialog(this, "Load failed: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+    private void onLoad(boolean merge) {
+        fileChooser.setDialogTitle(merge ? "Merge matrix" : "Replace matrix");
+        if (fileChooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        if (!merge && (!db.getRows().isEmpty() || !db.getUsers().isEmpty() || !db.getAllRoles().isEmpty())) {
+            int answer = JOptionPane.showConfirmDialog(this,
+                    "Replace the current users, roles, requests and results with this file? Use Merge matrix to keep current work.",
+                    "Replace matrix", JOptionPane.OK_CANCEL_OPTION);
+            if (answer != JOptionPane.OK_OPTION) return;
+        }
+        commitTableEdits();
+        saveEditorChanges();
+        try {
+            if (merge) {
+                StateManager.MergeResult result = StateManager.merge(db, fileChooser.getSelectedFile());
+                redrawAll();
+                statusLabel.setText("Merged " + result.requests() + " requests, " + result.users() + " users, " + result.roles() + " roles");
+            } else {
+                JsonObject ui = StateManager.load(db, fileChooser.getSelectedFile());
+                viewerTabs.removeAll();
+                editableEditors.clear();
+                userWidths.clear();
+                messageWidths.clear();
+                redrawAll();
+                applyUiState(ui);
+                statusLabel.setText("Matrix replaced");
+            }
+            persistSession();
+        } catch (IOException ex) {
+            api.logging().logToError("Import failed: " + ex.getMessage());
+            JOptionPane.showMessageDialog(this, "Import failed: " + ex.getMessage() + "\nYour current matrix has been kept.",
+                    "Import failed", JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -874,7 +1183,7 @@ public class AuthMatrixTab extends JPanel {
 
     private static JSeparator createSeparator() {
         JSeparator sep = new JSeparator(SwingConstants.VERTICAL);
-        sep.setPreferredSize(new Dimension(25, 0));
+        sep.setPreferredSize(new Dimension(1, 20));
         return sep;
     }
 
@@ -884,8 +1193,4 @@ public class AuthMatrixTab extends JPanel {
         menu.add(item);
     }
 
-    {
-        // Deferred user popup install (needs userTable to be initialized)
-        SwingUtilities.invokeLater(this::installUserPopups);
-    }
 }

@@ -6,14 +6,22 @@ import com.google.gson.*;
 import java.awt.Color;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 import java.util.*;
 
 public class StateManager {
     private static final String VERSION = "2.0.0";
 
     public static void save(MatrixDB db, File file) throws IOException {
+        writeAtomically(file, serialize(db, null));
+    }
+
+    public static String serialize(MatrixDB db, JsonObject ui) {
         JsonObject root = new JsonObject();
         root.addProperty("version", VERSION);
+
+        root.addProperty("headerCount", db.getHeaderCount());
+        if (ui != null) root.add("ui", ui);
 
         // Roles
         JsonArray rolesArr = new JsonArray();
@@ -52,6 +60,7 @@ public class StateManager {
                 obj.addProperty("type", "section");
                 obj.addProperty("name", s.getName());
                 obj.addProperty("color", String.format("#%06X", s.getColor().getRGB() & 0xFFFFFF));
+                obj.addProperty("collapsed", s.isCollapsed());
                 rowsArr.add(obj);
             } else if (row instanceof MessageEntry msg) {
                 JsonObject m = new JsonObject();
@@ -62,6 +71,7 @@ public class StateManager {
                 m.addProperty("port", msg.getPort());
                 m.addProperty("secure", msg.isSecure());
                 m.addProperty("requestBase64", b64Encode(msg.getRequest()));
+                m.addProperty("responseBase64", b64Encode(msg.getResponse()));
                 m.addProperty("regexBase64", b64Encode(msg.getRegex()));
                 m.addProperty("failureRegexMode", msg.isFailureRegexMode());
                 m.addProperty("enabled", msg.isEnabled());
@@ -90,30 +100,54 @@ public class StateManager {
         }
         root.add("rows", rowsArr);
 
-        try (Writer writer = new BufferedWriter(new FileWriter(file, StandardCharsets.UTF_8))) {
-            writer.write(new GsonBuilder().setPrettyPrinting().create().toJson(root));
+        return new GsonBuilder().setPrettyPrinting().create().toJson(root);
+    }
+
+    public static void writeAtomically(File file, String json) throws IOException {
+        Path target = file.toPath().toAbsolutePath();
+        Path temp = Files.createTempFile(target.getParent(), ".authmatrix-", ".tmp");
+        try {
+            Files.writeString(temp, json, StandardCharsets.UTF_8);
+            try {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ex) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp);
         }
     }
 
-    public static void load(MatrixDB db, File file) throws IOException {
-        String json;
-        try (BufferedReader reader = new BufferedReader(new FileReader(file, StandardCharsets.UTF_8))) {
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) sb.append(line);
-            json = sb.toString();
+    public static JsonObject load(MatrixDB db, File file) throws IOException {
+        return restore(db, Files.readString(file.toPath(), StandardCharsets.UTF_8));
+    }
+
+    /** Parse into an isolated matrix first: a malformed import must never erase current work. */
+    public static JsonObject restore(MatrixDB db, String json) throws IOException {
+        try {
+            JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+            if (!root.has("roles") || !root.has("users") || (!root.has("rows") && !root.has("messages")))
+                throw new IllegalArgumentException("Not an AuthMatrix v2 state file");
+            MatrixDB incoming = new MatrixDB();
+            read(incoming, root);
+            JsonObject ui = root.has("ui") ? root.getAsJsonObject("ui") : new JsonObject();
+            db.replaceWith(incoming);
+            return ui;
+        } catch (RuntimeException ex) {
+            throw new IOException("Invalid AuthMatrix state: " + ex.getMessage(), ex);
         }
+    }
 
-        JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-
-        db.clear();
-
+    private static void read(MatrixDB db, JsonObject root) {
+        if (root.has("headerCount")) db.setHeaderCount(Math.max(0, root.get("headerCount").getAsInt()));
         // Roles
         if (root.has("roles")) {
             for (JsonElement el : root.getAsJsonArray("roles")) {
                 JsonObject r = el.getAsJsonObject();
+                if (db.findRoleByName(requiredString(r, "name", "role")) != null)
+                    throw new IllegalArgumentException("Duplicate role name");
                 db.addRoleDirect(new RoleEntry(
-                        r.get("name").getAsString(),
+                        requiredString(r, "name", "role"),
                         r.has("singleUser") && r.get("singleUser").getAsBoolean()));
             }
         }
@@ -131,7 +165,7 @@ public class StateManager {
                 db.setHeaderCount(Math.max(db.getHeaderCount(), headers.size()));
 
                 UserEntry user = new UserEntry(
-                        u.get("name").getAsString(),
+                        requiredString(u, "name", "user"),
                         u.has("cookiesBase64") ? b64Decode(u.get("cookiesBase64").getAsString()) : "",
                         headers,
                         !u.has("enabled") || u.get("enabled").getAsBoolean());
@@ -144,16 +178,17 @@ public class StateManager {
                         user.setRole(role, checked);
                     }
                 }
+                if (db.findUserByName(user.getName()) != null) throw new IllegalArgumentException("Duplicate user name");
                 db.addUserDirect(user);
             }
         }
 
         // Rows: mixed sections + messages. Backward compat: old files use "messages" key.
-        SectionEntry.resetColorIndex();
         JsonArray rowsArr = root.has("rows") ? root.getAsJsonArray("rows")
                 : root.has("messages") ? root.getAsJsonArray("messages") : null;
 
         int maxId = 0;
+        Set<Integer> ids = new HashSet<>();
         if (rowsArr != null) {
             for (JsonElement el : rowsArr) {
                 JsonObject obj = el.getAsJsonObject();
@@ -165,23 +200,27 @@ public class StateManager {
                     if (obj.has("color")) {
                         try { sColor = Color.decode(obj.get("color").getAsString()); } catch (NumberFormatException ignored) {}
                     }
-                    db.addSectionDirect(sColor != null ? new SectionEntry(sName, sColor) : new SectionEntry(sName));
+                    SectionEntry section = sColor != null ? new SectionEntry(sName, sColor) : new SectionEntry(sName);
+                    section.setCollapsed(obj.has("collapsed") && obj.get("collapsed").getAsBoolean());
+                    db.addSectionDirect(section);
                     continue;
                 }
 
                 // message
                 JsonObject m = obj;
-                int id = m.has("id") ? m.get("id").getAsInt() : 0;
+                int id = m.has("id") ? m.get("id").getAsInt() : maxId;
+                if (id < 0 || ids.contains(id)) id = maxId;
+                ids.add(id);
                 maxId = Math.max(maxId, id + 1);
 
                 String regex = m.has("regexBase64") ? b64Decode(m.get("regexBase64").getAsString()) : "";
                 byte[] request = m.has("requestBase64") && !m.get("requestBase64").getAsString().isEmpty()
                         ? Base64.getDecoder().decode(m.get("requestBase64").getAsString()) : null;
 
-                MessageEntry msg = new MessageEntry(id, m.get("name").getAsString(),
-                        m.get("host").getAsString(), m.get("port").getAsInt(),
+                MessageEntry msg = new MessageEntry(id, requiredString(m, "name", "request"),
+                        requiredString(m, "host", "request"), m.get("port").getAsInt(),
                         m.has("secure") && m.get("secure").getAsBoolean(),
-                        request, null, regex);
+                        request, decodeBytes(m, "responseBase64"), regex);
 
                 msg.setFailureRegexMode(m.has("failureRegexMode") && m.get("failureRegexMode").getAsBoolean());
                 msg.setEnabled(!m.has("enabled") || m.get("enabled").getAsBoolean());
@@ -217,7 +256,126 @@ public class StateManager {
                 }
             }
         }
+        for (UserEntry user : db.getUsers()) user.ensureHeaderCount(db.getHeaderCount());
         db.setNextMessageId(maxId);
+    }
+
+    public static MergeResult merge(MatrixDB db, File file) throws IOException {
+        MatrixDB incoming = new MatrixDB();
+        load(incoming, file);
+        return merge(db, incoming);
+    }
+
+    /** Reuse identical users, rename conflicting users, and never overwrite current credentials. */
+    public static MergeResult merge(MatrixDB db, MatrixDB incoming) {
+        Map<RoleEntry, RoleEntry> roles = new IdentityHashMap<>();
+        Map<UserEntry, UserEntry> users = new IdentityHashMap<>();
+        int addedRoles = 0, addedUsers = 0;
+        // Decide user names before mapping their automatically generated single-user roles.
+        Map<UserEntry, String> names = new IdentityHashMap<>();
+        Set<String> reserved = new HashSet<>();
+        for (UserEntry user : db.getUsers()) reserved.add(user.getName());
+        for (UserEntry user : incoming.getUsers()) reserved.add(user.getName());
+        for (UserEntry user : incoming.getUsers()) {
+            String name = user.getName();
+            UserEntry existing = db.findUserByName(name);
+            if (existing != null && !sameUser(existing, user)) {
+                int suffix = 2;
+                while (reserved.contains(name = user.getName() + " (imported " + suffix++ + ")")) { }
+            }
+            names.put(user, name);
+            reserved.add(name);
+        }
+        for (RoleEntry role : incoming.getAllRoles()) {
+            String name = role.getName();
+            if (role.isSingleUser()) {
+                for (UserEntry user : incoming.getUsers()) {
+                    if (name.equals(user.getName() + MatrixDB.SINGLE_USER_SUFFIX)) {
+                        name = names.get(user) + MatrixDB.SINGLE_USER_SUFFIX;
+                        break;
+                    }
+                }
+            }
+            RoleEntry mapped = db.findRoleByName(name);
+            if (mapped != null && mapped.isSingleUser() != role.isSingleUser()) {
+                String base = name;
+                int suffix = 2;
+                while (db.findRoleByName(name = base + " (imported " + suffix++ + ")") != null) { }
+                mapped = null;
+            }
+            if (mapped == null) {
+                mapped = db.getOrCreateRole(name, role.isSingleUser());
+                addedRoles++;
+            }
+            roles.put(role, mapped);
+        }
+        db.setHeaderCount(Math.max(db.getHeaderCount(), incoming.getHeaderCount()));
+        for (UserEntry user : incoming.getUsers()) {
+            UserEntry mapped = db.findUserByName(names.get(user));
+            if (mapped == null) {
+                mapped = new UserEntry(names.get(user), user.getCookies(), user.getHeaders(), user.isEnabled());
+                db.addUserDirect(mapped);
+                addedUsers++;
+            }
+            for (RoleEntry role : incoming.getAllRoles()) {
+                if (user.hasRole(role)) mapped.setRole(roles.get(role), true);
+            }
+            users.put(user, mapped);
+        }
+        for (UserEntry user : db.getUsers()) user.ensureHeaderCount(db.getHeaderCount());
+        SectionEntry current = null;
+        for (Object row : incoming.getRows()) {
+            if (row instanceof SectionEntry section) {
+                current = db.findSectionByName(section.getName());
+                if (current == null) {
+                    current = new SectionEntry(section.getName(), section.getColor());
+                    current.setCollapsed(section.isCollapsed());
+                    db.addSectionDirect(current);
+                }
+            } else if (row instanceof MessageEntry msg) {
+                MessageEntry copy = db.createMessageInSection(current, msg.getHost(), msg.getPort(), msg.isSecure(),
+                        msg.getRequest(), msg.getResponse(), msg.getName(), msg.getRegex());
+                // Root imports belong before the first section, regardless of the current matrix layout.
+                if (current == null) {
+                    db.getRows().remove(copy);
+                    db.getRows().add(db.getRootMessages().size(), copy);
+                }
+                copy.setEnabled(msg.isEnabled());
+                copy.setFailureRegexMode(msg.isFailureRegexMode());
+                roles.forEach((source, target) -> copy.setRoleAuthorized(target, msg.isRoleAuthorized(source)));
+                msg.getUserRuns().forEach((user, run) -> copy.addRunResult(users.get(user), run.request(), run.response()));
+            }
+        }
+        // Re-evaluate against the combined matrix rather than trusting stale imported colors.
+        for (MessageEntry msg : db.getMessages()) {
+            if (!msg.getUserRuns().isEmpty()) RunEngine.evaluateRoleResults(db, msg);
+        }
+        return new MergeResult(addedUsers, addedRoles, incoming.getMessages().size());
+    }
+
+    private static boolean sameUser(UserEntry a, UserEntry b) {
+        if (!Objects.equals(a.getCookies(), b.getCookies()) || a.isEnabled() != b.isEnabled()) return false;
+        List<String> ah = new ArrayList<>(a.getHeaders()), bh = new ArrayList<>(b.getHeaders());
+        while (!ah.isEmpty() && ah.getLast().isEmpty()) ah.removeLast();
+        while (!bh.isEmpty() && bh.getLast().isEmpty()) bh.removeLast();
+        if (!ah.equals(bh)) return false;
+        Set<String> ar = new HashSet<>(), br = new HashSet<>();
+        a.getRoles().forEach((role, enabled) -> { if (enabled) ar.add(role.getName()); });
+        b.getRoles().forEach((role, enabled) -> { if (enabled) br.add(role.getName()); });
+        return ar.equals(br);
+    }
+
+    public record MergeResult(int users, int roles, int requests) { }
+
+    private static String requiredString(JsonObject object, String key, String item) {
+        if (!object.has(key) || object.get(key).isJsonNull() || !object.get(key).isJsonPrimitive())
+            throw new IllegalArgumentException("A " + item + " is missing its " + key + ".");
+        return object.get(key).getAsString();
+    }
+
+    private static byte[] decodeBytes(JsonObject object, String key) {
+        return object.has(key) && !object.get(key).getAsString().isEmpty()
+                ? Base64.getDecoder().decode(object.get(key).getAsString()) : null;
     }
 
     private static String b64Encode(String s) {

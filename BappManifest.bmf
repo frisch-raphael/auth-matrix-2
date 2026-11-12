@@ -1,13 +1,13 @@
 Uuid: 30d8ee9f40c041b0bfec67441aad158e
-ExtensionType: 2
+ExtensionType: 1
 Name: AuthMatrix
 RepoName: auth-matrix
-ScreenVersion: 0.8.2
-SerialVersion: 12
+ScreenVersion: 2.0.0
+SerialVersion: 13
 MinPlatformVersion: 0
 ProOnly: False
 Author: Mick Ayzenberg, Security Innovation
 ShortDescription: Provides a simple way to test authorization in web applications and web services.
-EntryPoint: AuthMatrix.py
-BuildCommand: 
+EntryPoint: auth-matrix-2/build/libs/auth-matrix.jar
+BuildCommand: ./auth-matrix-2/gradlew -p auth-matrix-2 jar
 SupportedProducts: Pro, Community

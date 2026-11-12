@@ -1,3 +1,15 @@
+v2.0.0 - Java extension updates
+
+* Added context-menu actions to stop highlighting selected request paths without adding them to the matrix.
+* Added saved wildcard path patterns for changing IDs, GUIDs and query values, with live matching preview and pattern management.
+* Removed the previous Jython implementation and legacy screenshots.
+* Automatically restore users, roles, requests, results and UI layout across Burp restarts.
+* Added non-destructive JSON matrix merging with user/role reference remapping.
+* Replaced the crowded button row with Run all, Cancel and Add/File/Options menus.
+* Preserve original responses and empty header columns in state files; malformed imports leave current work intact.
+* Added regression tests for persistence, merge behavior and Swing layout.
+* Linux Burp UI verification: keep newly merged, untested roles uncolored and explain incomplete request imports.
+
 v0.8 - 11/26/2018
 
 STATE FILE COMPATIBILITY - v0.5.2 and greater

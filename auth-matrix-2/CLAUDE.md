@@ -28,7 +28,8 @@ AuthMatrix v2 is a Burp Suite extension for testing authorization in web applica
 authmatrix/
   Extension.java           - BurpExtension entry point, context menu provider
   RunEngine.java           - Request execution, cookie/header substitution, result evaluation
-  StateManager.java        - JSON save/load (Gson-based)
+  StateManager.java        - Transactional JSON load, merge and atomic save (Gson-based)
+  SessionStore.java        - Burp project persistence and local session recovery
   model/
     MatrixDB.java          - Central data store, CRUD operations, thread-safe with ReentrantLock
     UserEntry.java         - User: name, cookies, headers, role assignments
@@ -63,3 +64,9 @@ authmatrix/
 1. Build the JAR: `./gradlew jar`
 2. In Burp: Extensions > Installed > Add > Select JAR from `build/libs/`
 3. Service loader file at `META-INF/services/burp.api.montoya.BurpExtension` points to `authmatrix.Extension`
+
+## Persistence and verification
+
+`AuthMatrixTab` checkpoints state on the EDT every two seconds and on redraw/unload, using `tryLock` to avoid blocking a run. `SessionStore` stores snapshots in Burp project data and atomic local recovery files. `StateManager.restore` parses an isolated matrix before replacing live contents. Merge preserves existing identities and remaps conflicting imported users/roles.
+
+JUnit tests under `src/test/java` cover state compatibility, import failures, merge identity remapping, project recovery isolation and Swing layout. `gradlew test` renders Swing previews under `build/ui-preview-*.png` without altering the user's running Burp instances.
