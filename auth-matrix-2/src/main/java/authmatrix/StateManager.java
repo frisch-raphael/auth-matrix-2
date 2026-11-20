@@ -266,6 +266,15 @@ public class StateManager {
         return merge(db, incoming);
     }
 
+    public static LegacyMergeResult mergeLegacy(MatrixDB db, File file) throws IOException {
+        LegacyState.Converted converted = LegacyState.read(file.toPath());
+        MatrixDB incoming = new MatrixDB();
+        restore(incoming, converted.state().toString());
+        return new LegacyMergeResult(merge(db, incoming), converted.skippedChainData());
+    }
+
+    public record LegacyMergeResult(MergeResult merged, boolean skippedChainData) { }
+
     /** Reuse identical users, rename conflicting users, and never overwrite current credentials. */
     public static MergeResult merge(MatrixDB db, MatrixDB incoming) {
         Map<RoleEntry, RoleEntry> roles = new IdentityHashMap<>();

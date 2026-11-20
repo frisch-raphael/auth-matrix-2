@@ -16,7 +16,7 @@ AuthMatrix v2 is a complete rewrite of [AuthMatrix](https://github.com/SecurityI
 ### Removed features
 
 - **Chains** — The chain mechanism (CSRF token extraction, cross-user resource testing, automated authentication) has been removed. This includes chain sources, static values, and the chain table.
-- **Legacy state file loading** — Old serialized Jython state files (pre-v0.6.3) are not supported. JSON state files are still supported with a new v2 format.
+- **Legacy state file loading** — Import Python/Jython JSON saves using **File > Import legacy AuthMatrix**. Pre-v0.6.3 binary saves require export to JSON first.
 
 ### New features
 
@@ -120,4 +120,4 @@ The action bar keeps **Run all** and **Cancel** visible:
 
 Restored UI includes split positions, column widths, collapsed sections, selected request and viewer tab, request scroll position and highlighting preference. Recovery files contain the matrix's credentials and HTTP content. A hard process kill can lose edits since the last checkpoint.
 
-See [state format and merge rules](../JsonState.md). Jython v1 state files are unsupported; earlier v2 files remain supported.
+See [state formats and merge rules](../JsonState.md) for Python-era and earlier v2 compatibility.

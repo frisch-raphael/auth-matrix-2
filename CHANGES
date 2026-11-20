@@ -1,3 +1,12 @@
+v2.0.1 - Legacy JSON import and session recovery
+
+* Import Python-era AuthMatrix JSON saves from the File menu, preserving HTTP request bytes and saved run data.
+* Preserve saved session data and pause automatic checkpoints when startup recovery fails.
+* Try a valid local recovery copy when Burp project state cannot be restored.
+* Save to Burp project data even if the local recovery directory is unavailable.
+* Recreate a missing recovery copy on the first checkpoint after restoring project data.
+* Log the restore source and request count.
+
 v2.0.0 - Java extension updates
 
 * Added context-menu actions to stop highlighting selected request paths without adding them to the matrix.

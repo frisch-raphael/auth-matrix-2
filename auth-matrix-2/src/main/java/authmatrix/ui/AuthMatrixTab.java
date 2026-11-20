@@ -135,6 +135,8 @@ public class AuthMatrixTab extends JPanel {
         cancelButton.addActionListener(e -> engine.cancel());
         runButton.setToolTipText("Run every enabled request for all enabled users");
         statusLabel = new JLabel("Ready");
+        if (sessionStore.isRestoreBlocked()) statusLabel.setText(
+                "Automatic saving paused: restore failed. Saved data kept. Use File > Replace matrix or Clear matrix to resume.");
         statusLabel.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
 
         addMenu.setMnemonic(KeyEvent.VK_A);
@@ -147,6 +149,7 @@ public class AuthMatrixTab extends JPanel {
         addMenuItem(fileMenu, "Save matrix...", e -> onSave());
         addMenuItem(fileMenu, "Merge matrix...", e -> onLoad(true));
         addMenuItem(fileMenu, "Replace matrix...", e -> onLoad(false));
+        addMenuItem(fileMenu, "Import legacy AuthMatrix...", e -> onImportLegacy());
         fileMenu.addSeparator();
         addMenuItem(fileMenu, "Export HTML report...", e -> onExportHtml());
         fileMenu.addSeparator();
@@ -929,6 +932,7 @@ public class AuthMatrixTab extends JPanel {
     }
 
     public void persistSession() {
+        if (sessionStore.isRestoreBlocked()) return;
         if (!db.getLock().tryLock()) return; // A run owns the matrix; save the complete result when it finishes.
         try {
             saveEditorChanges();
@@ -1094,6 +1098,7 @@ public class AuthMatrixTab extends JPanel {
                 statusLabel.setText("Merged " + result.requests() + " requests, " + result.users() + " users, " + result.roles() + " roles");
             } else {
                 JsonObject ui = StateManager.load(db, fileChooser.getSelectedFile());
+                sessionStore.resumeAfterExplicitReplacement();
                 viewerTabs.removeAll();
                 editableEditors.clear();
                 userWidths.clear();
@@ -1103,16 +1108,53 @@ public class AuthMatrixTab extends JPanel {
                 statusLabel.setText("Matrix replaced");
             }
             persistSession();
-        } catch (IOException ex) {
-            api.logging().logToError("Import failed: " + ex.getMessage());
-            JOptionPane.showMessageDialog(this, "Import failed: " + ex.getMessage() + "\nYour current matrix has been kept.",
-                    "Import failed", JOptionPane.ERROR_MESSAGE);
+        } catch (IOException ex) { showImportError(ex); }
+    }
+
+    private void onImportLegacy() {
+        fileChooser.setDialogTitle("Import legacy AuthMatrix JSON");
+        if (fileChooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        if (!db.getLock().tryLock()) {
+            JOptionPane.showMessageDialog(this, "Wait for the current run to finish, then import the file again.",
+                    "Matrix run in progress", JOptionPane.INFORMATION_MESSAGE);
+            return;
         }
+        StateManager.LegacyMergeResult imported;
+        try {
+            try {
+                commitTableEdits();
+                saveEditorChanges();
+                imported = StateManager.mergeLegacy(db, fileChooser.getSelectedFile());
+            } finally {
+                db.getLock().unlock();
+            }
+        } catch (IOException ex) {
+            showImportError(ex);
+            return;
+        }
+        String summary = "Imported " + imported.merged().requests() + " requests. Added "
+                + imported.merged().users() + " users and " + imported.merged().roles() + " roles.";
+        statusLabel.setText(summary);
+        redrawAll();
+        if (imported.skippedChainData()) {
+            JOptionPane.showMessageDialog(this, summary + "\nSaved chains and chain source values were skipped because this version does not support them.",
+                    "Legacy AuthMatrix import", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }
+
+    private void showImportError(IOException ex) {
+        api.logging().logToError("Import failed: " + ex.getMessage());
+        JOptionPane.showMessageDialog(this, "Import failed: " + ex.getMessage() + "\nYour current matrix has been kept.",
+                "Import failed", JOptionPane.ERROR_MESSAGE);
     }
 
     private void onClear() {
         int result = JOptionPane.showConfirmDialog(this, "Clear AuthMatrix Configuration?", "Clear Config", JOptionPane.YES_NO_OPTION);
-        if (result == JOptionPane.YES_OPTION) { db.clear(); viewerTabs.removeAll(); editableEditors.clear(); redrawAll(); }
+        if (result == JOptionPane.YES_OPTION) {
+            db.clear();
+            sessionStore.resumeAfterExplicitReplacement();
+            viewerTabs.removeAll(); editableEditors.clear(); redrawAll();
+        }
     }
 
     private void onChangeRegexes() {

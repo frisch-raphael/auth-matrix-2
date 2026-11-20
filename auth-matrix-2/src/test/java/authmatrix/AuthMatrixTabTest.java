@@ -55,6 +55,9 @@ class AuthMatrixTabTest {
             assertEquals(3, menus.getMenuCount());
             assertEquals("Add", menus.getMenu(0).getText());
             assertEquals("Merge matrix...", menus.getMenu(1).getItem(1).getText());
+            assertTrue(java.util.Arrays.stream(menus.getMenu(1).getMenuComponents())
+                    .anyMatch(component -> component instanceof JMenuItem item
+                            && "Import legacy AuthMatrix...".equals(item.getText()) && item.isEnabled()));
             assertEquals(400, tab.captureUiState().get("mainDivider").getAsInt());
             assertEquals(1, tab.captureUiState().get("selectedRequest").getAsInt());
             assertEquals(1, tab.captureUiState().get("viewerTab").getAsInt());

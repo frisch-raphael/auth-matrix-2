@@ -26,7 +26,7 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 public class Extension implements BurpExtension {
-    private static final String VERSION = "2.0.0";
+    private static final String VERSION = "2.0.1";
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -36,8 +36,7 @@ public class Extension implements BurpExtension {
         SessionStore sessionStore = new SessionStore(api);
         JsonObject ui = new JsonObject();
         try {
-            String saved = sessionStore.load();
-            if (saved != null) ui = StateManager.restore(db, saved);
+            ui = sessionStore.restore(db);
         } catch (Exception ex) {
             api.logging().logToError("Session restore failed: " + ex.getMessage());
         }

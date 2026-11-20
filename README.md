@@ -12,8 +12,9 @@ Load `auth-matrix-2/build/libs/auth-matrix.jar` through Burp's **Extensions > In
 
 The current implementation and full usage guide are in [auth-matrix-2](auth-matrix-2/README.md). The previous Python implementation has been removed.
 
-- Automatic session recovery restores users, roles, requests, results and UI layout after a Burp restart.
+- Saves users, roles, requests, results and UI layout to Burp project data with a local recovery copy.
 - **File > Merge matrix** adds a saved v2 JSON matrix to current work; **Replace matrix** opens it instead.
+- **File > Import legacy AuthMatrix** brings a Python/Jython JSON save into the current matrix.
 - **Add** groups user, role, header and section actions. **Options** contains proxy path highlighting.
 
 See [JSON state format](JsonState.md) for compatibility and merge behavior.

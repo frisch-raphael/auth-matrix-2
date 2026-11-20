@@ -1,6 +1,12 @@
 # AuthMatrix v2 JSON state
 
-Use **File > Save matrix** to export the current matrix and layout. Files use UTF-8 JSON and version `2.0.0`. Earlier v2 files without UI data, header counts, original responses or sections still load. Jython v1 state files are unsupported.
+Use **File > Save matrix** to export the current matrix and layout. Files use UTF-8 JSON and version `2.0.0`. Earlier v2 files without UI data, header counts, original responses or sections still load.
+
+## Importing Python-era saves
+
+Choose **File > Import legacy AuthMatrix** and select a JSON file saved by the Python/Jython extension, including v0.8.2 saves. The importer adds requests to the unsectioned area and uses the same conflict rules as **Merge matrix**. It discards entries marked deleted and preserves the display order, credentials, role assignments, request settings and saved per-user run data. Legacy role colors are recalculated from the imported runs using v2's rules. The old format did not save an original response.
+
+The importer skips chains and chain source values and reports when it does. Pre-v0.6.3 binary saves must first be exported as JSON from the legacy extension.
 
 ## Structure
 
@@ -31,6 +37,8 @@ HTTP payloads are stored as Base64 bytes; cookies, regexes and header strings us
 ## Automatic persistence
 
 Every two seconds, and after matrix redraws or a clean extension unload, AuthMatrix checkpoints its session. A running matrix is saved after its run finishes. Burp project data is the primary store. A local recovery copy is also written atomically under `~/.authmatrix/sessions/`.
+
+Startup validates project state before starting checkpoints and tries local recovery if project state cannot be restored. If neither saved copy can be restored, automatic saving is paused and the original bytes are preserved. A successful **File > Replace matrix**, or a confirmed **Clear matrix**, explicitly resumes saving. Failure to write local recovery does not prevent saving to the Burp project file.
 
 Named projects use a hashed stable project ID for their recovery file. Burp's default **Temporary Project** uses a shared recovery slot so it can recover after a new Burp process starts, including Community Edition. Concurrent default temporary projects share this slot; the most recent save wins. Montoya does not expose a temporary-project flag, so renamed temporary projects use their project ID instead and should be exported before closing.
 
